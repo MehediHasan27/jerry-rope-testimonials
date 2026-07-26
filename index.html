@@ -1,0 +1,1212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jerry Rope Testimonials — Lab</title>
+<!--
+  Testimonial clothesline, as one lit 3D scene.
+
+  A mouse leans in from the left edge of the frame and hauls a rope hand over hand. The
+  testimonial cards hang from that rope on loops like laundry: each card is a real cloth
+  mesh (24x14 quads) pinned at its two top corners, so it ripples, billows and furls its
+  free edge in a travelling wind field, with lighting and shadow following the deformation.
+  Dragging (or arrows / dots) makes him pull: the active card travels off canvas and the one
+  peeking at the right takes its place.
+
+  Everything in the stage is WebGL — rope (swept tube), cards (cloth), character. Card text
+  is painted to a canvas texture; the same text is in the DOM, visually hidden, for screen
+  readers.
+
+  Needs vendor/three.bundle.js beside this file: three.js repacked as a classic script,
+  because ES-module imports do not work over file://.
+
+  The character is an original stylized mouse built from primitives in buildMouse(), NOT the
+  Warner Bros. character. To use your own model, load a GLB there and map its joints onto the
+  same names in `rig`; poseJerry() drives everything through those.
+
+  Sample testimonial copy below is placeholder — replace DATA.
+-->
+<style>
+:root{
+  color-scheme: light;
+  --cream:#F7EFE1;
+  --cream-2:#EDE0C9;
+  --ink:#2A211A;
+  --ink-soft:#6B5C4C;
+  --terra:#C2603C;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:
+    radial-gradient(120% 90% at 76% 6%, #FFF9EE 0%, rgba(255,249,238,0) 62%),
+    linear-gradient(180deg, var(--cream) 0%, var(--cream-2) 100%);
+  color:var(--ink);
+  font-family:-apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, system-ui, sans-serif;
+  min-height:100vh;
+}
+.rope-section{max-width:1320px;margin:0 auto;padding:clamp(32px,5vw,72px) clamp(16px,4vw,48px) clamp(28px,4vw,56px)}
+.rope-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:clamp(6px,1.4vw,14px)}
+.eyebrow{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--terra);font-weight:600;margin:0 0 10px}
+.rope-head h2{
+  font-family:Georgia,"Iowan Old Style","Times New Roman",serif;
+  font-weight:400;font-size:clamp(28px,4.4vw,50px);line-height:1.04;letter-spacing:-.015em;margin:0;max-width:16ch;
+}
+.rope-head h2 em{font-style:italic;color:var(--terra)}
+.rope-head p{margin:0;max-width:34ch;font-size:14px;line-height:1.55;color:var(--ink-soft)}
+
+.stage{
+  position:relative;
+  height:clamp(520px,58vh,660px);
+  overflow:hidden;
+  touch-action:pan-y;
+  cursor:grab;
+  user-select:none;-webkit-user-select:none;
+  border-radius:22px;
+}
+.stage:active{cursor:grabbing}
+.stage:focus-visible{outline:2px solid var(--terra);outline-offset:4px}
+#gl{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+.rope-foot{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:clamp(10px,2vw,20px)}
+.nav{display:flex;gap:8px}
+.nav button{
+  width:44px;height:44px;border-radius:50%;
+  border:1px solid rgba(90,66,40,.22);background:rgba(255,255,255,.7);color:var(--ink);
+  display:grid;place-items:center;cursor:pointer;
+  transition:background .18s ease,border-color .18s ease,transform .18s ease;
+}
+.nav button:hover{background:#fff;border-color:rgba(90,66,40,.4)}
+.nav button:active{transform:translateY(1px)}
+.nav button:focus-visible{outline:2px solid var(--terra);outline-offset:3px}
+.nav svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.dots{display:flex;gap:7px;align-items:center}
+.dot{width:8px;height:8px;padding:0;border:0;border-radius:50%;background:rgba(90,66,40,.26);cursor:pointer;
+  transition:width .25s cubic-bezier(.2,.8,.2,1),background .25s ease}
+.dot[aria-current="true"]{width:26px;border-radius:5px;background:var(--terra)}
+.dot:focus-visible{outline:2px solid var(--terra);outline-offset:3px}
+.hint{font-size:12px;color:var(--ink-soft);margin-left:auto;display:flex;align-items:center;gap:8px;transition:opacity .5s ease}
+.hint.is-gone{opacity:0}
+.hint kbd{font:inherit;font-size:11px;border:1px solid rgba(90,66,40,.26);border-bottom-width:2px;border-radius:5px;padding:1px 5px;background:rgba(255,255,255,.65)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.fallback{display:none;padding:24px;font-size:14px;line-height:1.6;color:var(--ink-soft)}
+.no-webgl .fallback{display:block}
+.no-webgl #gl{display:none}
+</style>
+</head>
+<body>
+
+<section class="rope-section" aria-roledescription="carousel" aria-label="Customer testimonials">
+  <div class="rope-head">
+    <div>
+      <p class="eyebrow">Word on the line</p>
+      <h2>They said it <em>out loud</em>, we hung it out to dry.</h2>
+    </div>
+    <p>Jerry does the heavy lifting. Drag the line — or nudge him with the arrows — to haul in the next one.</p>
+  </div>
+
+  <div class="stage" id="stage" tabindex="0" aria-label="Testimonial clothesline. Drag horizontally or use arrow keys.">
+    <canvas id="gl"></canvas>
+    <div class="fallback" id="fallback">This section needs WebGL. The testimonials are listed below.</div>
+    <ul class="sr" id="srList"></ul>
+  </div>
+
+  <div class="rope-foot">
+    <div class="nav">
+      <button type="button" id="prev" aria-label="Previous testimonial">
+        <svg viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></svg>
+      </button>
+      <button type="button" id="next" aria-label="Next testimonial">
+        <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+      </button>
+    </div>
+    <div class="dots" id="dots" role="tablist" aria-label="Choose testimonial"></div>
+    <p class="hint" id="hint">Drag the rope <kbd>←</kbd><kbd>→</kbd></p>
+  </div>
+  <p class="sr" aria-live="polite" id="status"></p>
+</section>
+
+<script src="vendor/three.bundle.js"></script>
+<script>
+(() => {
+"use strict";
+
+/* =====================================================================
+   TUNABLES
+   ===================================================================== */
+const CFG = {
+  rope:{
+    points:56,
+    slack:1.008,
+    gravity:180,
+    damp:0.978,
+    iterations:6,
+    /* a free hanging chain over a span this long sags hundreds of px and never settles the
+       same way twice, so the macro shape is a designed baseline the points are sprung to;
+       wind, card weight and Jerry's yanks are the deviation */
+    stiff:110,
+    sag:0.028,
+    windX:900,
+    windY:460,
+    tugAmp:30,
+    radius:2.9,
+  },
+  card:{
+    weight:1250,
+    ringInset:14,
+    segX:24, segY:14,          // cloth resolution
+    swingK:30, swingDamp:4.2, swingInertia:0.0009, maxSwing:0.10,
+    /* wind field on the cloth */
+    waveAmp:0.21,              // of card height, at full wind
+    waveLenU:13.5,             // ripples across the width (~2 cycles)
+    waveLenV:2.6,
+    waveSpeed:4.0,
+    curl:0.5,                  // how much the free bottom corners furl
+  },
+  motion:{
+    springK:120, springDamp:19,
+    flickThreshold:520,
+    dragThreshold:0.22,
+    cyclesPerCard:2,
+  },
+};
+
+/* =====================================================================
+   SAMPLE CONTENT — replace with your own
+   ===================================================================== */
+const DATA = [
+  { quote:"The rope physics is the whole pitch. People drag it three or four times before they even read the words — and then they read all of them.",
+    name:"Marisol Vega", role:"Head of Growth, Northwind Studio", tint:"#C2603C", stars:5 },
+  { quote:"We shipped it on a Thursday. By Monday support had four emails asking who animated the mouse. Nobody asked about the pricing table.",
+    name:"Dev Raman", role:"Founder, Halftone", tint:"#7C8C6A", stars:5 },
+  { quote:"I have reviewed a lot of testimonial sections. This is the first one my team argued about — in a good way — for an entire standup.",
+    name:"Aoife Brennan", role:"Design Lead, Kestrel", tint:"#3F6B8A", stars:5 },
+  { quote:"Sixty frames a second of tiny rodent labour. It somehow made the quotes feel earned instead of pasted in from a spreadsheet.",
+    name:"Tomas Lindqvist", role:"Creative Director, Fold", tint:"#A8623F", stars:4 },
+  { quote:"Dwell time on the section went from four seconds to twenty-six. The wind on the cards is doing something to people's brains.",
+    name:"Priya Nadar", role:"Product Marketing, Slate & Co.", tint:"#6B5C8A", stars:5 },
+  { quote:"Handed it to a client with no explanation. First thing they did was drag it backwards to watch him strain the other way.",
+    name:"Ezra Coleman", role:"Partner, Meanwhile", tint:"#8A6B3F", stars:5 },
+];
+
+/* =====================================================================
+   SETUP
+   ===================================================================== */
+const stage    = document.getElementById("stage");
+const glCanvas = document.getElementById("gl");
+const dotsWrap = document.getElementById("dots");
+const statusEl = document.getElementById("status");
+const hintEl   = document.getElementById("hint");
+const srList   = document.getElementById("srList");
+
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const clamp = (v,a,b) => v<a?a:v>b?b:v;
+const lerp  = (a,b,t) => a+(b-a)*t;
+const easeIO = t => t<.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
+
+let renderer = null;
+try { renderer = new THREE.WebGLRenderer({ canvas:glCanvas, alpha:true, antialias:true }); }
+catch(e){ document.body.classList.add("no-webgl"); }
+
+if(renderer){
+renderer.setClearAlpha(0);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene  = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(30, 1, 10, 8000);
+
+/* Scene units are stage pixels: pixel (px,py) -> (px - W/2, -(py - H/2), z), with the camera
+   pushed back so the z = 0 plane is exactly 1:1 with CSS px. */
+const vx = px => px - W/2;
+const vy = py => -(py - H/2);
+
+/* ---------- lights ---------- */
+const hemi = new THREE.HemisphereLight(0xfff8ec, 0xa07a4e, 1.35);
+const key  = new THREE.DirectionalLight(0xfff2df, 2.35);
+const fill = new THREE.DirectionalLight(0xdbe8ff, 0.5);
+const rim  = new THREE.DirectionalLight(0xffffff, 0.75);
+key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024);
+key.shadow.bias = -0.0012;
+key.shadow.normalBias = 2;
+key.shadow.radius = 7;
+scene.add(hemi, key, fill, rim);
+
+/* a wall a little behind everything, so cards and character throw real shadows */
+const wall = new THREE.Mesh(new THREE.PlaneGeometry(1,1), new THREE.ShadowMaterial({ opacity:0.11 }));
+wall.receiveShadow = true;
+scene.add(wall);
+
+/* ---------- materials ---------- */
+const MAT = {
+  rope  : null,
+  thread: new THREE.MeshStandardMaterial({ color:0x8A7358, roughness:0.85 }),
+  ring  : new THREE.MeshStandardMaterial({ color:0xB9A184, roughness:0.45, metalness:0.35 }),
+  fur   : new THREE.MeshPhysicalMaterial({ color:0xA9764A, roughness:0.72, sheen:0.65, sheenColor:0xE7C79A, sheenRoughness:0.65, clearcoat:0.08 }),
+  furDk : new THREE.MeshPhysicalMaterial({ color:0x8A5C38, roughness:0.78, sheen:0.5, sheenColor:0xD8B88C }),
+  belly : new THREE.MeshPhysicalMaterial({ color:0xF4E3C4, roughness:0.8, sheen:0.7, sheenColor:0xFFF6E4 }),
+  ear   : new THREE.MeshPhysicalMaterial({ color:0xE2A79C, roughness:0.62, clearcoat:0.2 }),
+  nose  : new THREE.MeshPhysicalMaterial({ color:0xD98C86, roughness:0.3, clearcoat:0.7 }),
+  hand  : new THREE.MeshPhysicalMaterial({ color:0xF6E8CE, roughness:0.62 }),
+  eye   : new THREE.MeshPhysicalMaterial({ color:0xFFFFFF, roughness:0.14, clearcoat:1 }),
+  pupil : new THREE.MeshPhysicalMaterial({ color:0x241A14, roughness:0.16, clearcoat:1 }),
+  dark  : new THREE.MeshStandardMaterial({ color:0x5E3E28, roughness:0.6 }),
+  mouth : new THREE.MeshStandardMaterial({ color:0x5E3226, roughness:0.5 }),
+  drop  : new THREE.MeshPhysicalMaterial({ color:0xAEDCF0, roughness:0.04, clearcoat:1, clearcoatRoughness:0,
+                                           transparent:true, opacity:0.88, emissive:0x2C6E8C, emissiveIntensity:0.25 }),
+};
+
+const GEO = {
+  ball : new THREE.SphereGeometry(1, 20, 14),
+  ring : new THREE.TorusGeometry(6.4, 1.5, 8, 18),
+};
+
+/* y is screen-down everywhere in this file, so it is negated on the way into three */
+function ball(mat, rx, ry, rz, x, y, z){
+  const m = new THREE.Mesh(GEO.ball, mat);
+  m.scale.set(rx, ry, rz ?? rx);
+  m.position.set(x||0, -(y||0), z||0);
+  m.castShadow = true;
+  return m;
+}
+const at = (o,x,y,z) => { o.position.set(x, -y, z); return o; };
+
+/* a tapered limb segment from its group origin along +x, with joint balls at both ends so
+   the silhouette stays continuous however far the IK swings it */
+function segment(mat, L, r0, r1){
+  const g = new THREE.Group();
+  const cyl = new THREE.Mesh(new THREE.CylinderGeometry(r1, r0, L, 14, 1, true), mat);
+  cyl.rotation.z = -Math.PI/2;
+  cyl.position.x = L/2;
+  cyl.castShadow = true;
+  g.add(cyl, ball(mat, r0,r0,r0, 0,0,0), ball(mat, r1,r1,r1, L,0,0));
+  return g;
+}
+
+/* ---------- a tube whose centreline is rewritten every frame ---------- */
+function makeTube(nSeg, nRing, mat){
+  const geo = new THREE.BufferGeometry();
+  const count = nSeg*nRing;
+  const pos = new Float32Array(count*3), nor = new Float32Array(count*3), uv = new Float32Array(count*2);
+  const idx = [];
+  for(let s=0;s<nSeg-1;s++) for(let r=0;r<nRing;r++){
+    const r2=(r+1)%nRing;
+    const a=s*nRing+r, b=s*nRing+r2, c=(s+1)*nRing+r2, d=(s+1)*nRing+r;
+    idx.push(a,b,d, b,c,d);
+  }
+  for(let s=0;s<nSeg;s++) for(let r=0;r<nRing;r++){
+    const i=(s*nRing+r)*2; uv[i]=s/(nSeg-1)*120; uv[i+1]=r/nRing;
+  }
+  geo.setAttribute("position", new THREE.BufferAttribute(pos,3));
+  geo.setAttribute("normal",   new THREE.BufferAttribute(nor,3));
+  geo.setAttribute("uv",       new THREE.BufferAttribute(uv,2));
+  geo.setIndex(idx);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.castShadow = true;
+  return { mesh, geo, nSeg, nRing,
+           ringCos:Array.from({length:nRing},(_,r)=>Math.cos(r/nRing*Math.PI*2)),
+           ringSin:Array.from({length:nRing},(_,r)=>Math.sin(r/nRing*Math.PI*2)) };
+}
+const _t=new THREE.Vector3(), _n=new THREE.Vector3(), _b=new THREE.Vector3(), _up=new THREE.Vector3(0,0,1);
+function updateTube(tube, pts, radius, taper){
+  const pos = tube.geo.attributes.position.array, nor = tube.geo.attributes.normal.array;
+  const {nSeg,nRing,ringCos,ringSin} = tube;
+  for(let s=0;s<nSeg;s++){
+    const p=pts[s], pPrev=pts[Math.max(0,s-1)], pNext=pts[Math.min(nSeg-1,s+1)];
+    _t.set(pNext.x-pPrev.x, pNext.y-pPrev.y, (pNext.z||0)-(pPrev.z||0));
+    if(_t.lengthSq()<1e-9) _t.set(1,0,0);
+    _t.normalize();
+    _n.crossVectors(_t,_up); if(_n.lengthSq()<1e-9) _n.set(0,1,0); _n.normalize();
+    _b.crossVectors(_t,_n).normalize();
+    const r = radius * (taper ? taper(s/(nSeg-1)) : 1);
+    for(let k=0;k<nRing;k++){
+      const c=ringCos[k], sn=ringSin[k];
+      const nx=_n.x*c+_b.x*sn, ny=_n.y*c+_b.y*sn, nz=_n.z*c+_b.z*sn;
+      const i=(s*nRing+k)*3;
+      pos[i]=p.x+nx*r; pos[i+1]=p.y+ny*r; pos[i+2]=(p.z||0)+nz*r;
+      nor[i]=nx; nor[i+1]=ny; nor[i+2]=nz;
+    }
+  }
+  tube.geo.attributes.position.needsUpdate = true;
+  tube.geo.attributes.normal.needsUpdate = true;
+}
+
+/* ---------- rope look: procedural twist texture ---------- */
+function ropeTexture(){
+  const c=document.createElement("canvas"); c.width=64; c.height=64;
+  const x=c.getContext("2d");
+  x.fillStyle="#C08A55"; x.fillRect(0,0,64,64);
+  for(let i=-64;i<128;i+=16){
+    const g=x.createLinearGradient(i,0,i+16,64);
+    g.addColorStop(0,   "rgba(255,229,186,.75)");
+    g.addColorStop(0.45,"rgba(196,140,86,.15)");
+    g.addColorStop(0.5, "rgba(120,80,44,.55)");
+    g.addColorStop(0.62,"rgba(196,140,86,.15)");
+    g.addColorStop(1,   "rgba(255,229,186,.55)");
+    x.fillStyle=g;
+    x.beginPath(); x.moveTo(i,0); x.lineTo(i+16,0); x.lineTo(i+32,64); x.lineTo(i+16,64); x.closePath(); x.fill();
+  }
+  const t=new THREE.CanvasTexture(c);
+  t.wrapS=t.wrapT=THREE.RepeatWrapping;
+  t.colorSpace=THREE.SRGBColorSpace;
+  t.anisotropy=renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+const ropeTex = ropeTexture();
+MAT.rope = new THREE.MeshStandardMaterial({ map:ropeTex, roughness:0.82, bumpMap:ropeTex, bumpScale:1.1 });
+
+const line    = makeTube(CFG.rope.points, 10, MAT.rope);
+const freeEnd = makeTube(26, 8, MAT.rope);
+scene.add(line.mesh, freeEnd.mesh);
+
+/* =====================================================================
+   CARD CLOTH
+   ===================================================================== */
+function paintCard(d, w, h, dpr){
+  const c=document.createElement("canvas");
+  c.width=Math.max(2,Math.round(w*dpr));
+  c.height=Math.max(2,Math.round(h*dpr));
+  const x=c.getContext("2d");
+  x.scale(dpr,dpr);
+
+  const g=x.createLinearGradient(0,0,w*0.25,h);
+  g.addColorStop(0,"#FFFEFA"); g.addColorStop(0.55,"#FDF7EC"); g.addColorStop(1,"#F6EEDD");
+  x.fillStyle=g; x.fillRect(0,0,w,h);
+
+  x.globalAlpha=0.05;                                     // paper fibre
+  for(let i=0;i<Math.round(w*h/260);i++){
+    x.fillStyle = i%3 ? "#8A7454" : "#ffffff";
+    x.fillRect(Math.random()*w, Math.random()*h, 1.6, 1);
+  }
+  x.globalAlpha=1;
+  x.strokeStyle="rgba(186,164,130,.5)"; x.lineWidth=1.5; x.strokeRect(.75,.75,w-1.5,h-1.5);
+
+  const stacked = w/h < 1.75;
+  const pad  = Math.round(Math.min(w,h)*0.11);
+  const qSize= stacked ? Math.round(h*0.072) : Math.round(h*0.105);
+  const colW = stacked ? w-pad*2 : (w-pad*2)*0.60;
+
+  x.fillStyle="#2A211A";
+  x.font=`${qSize}px Georgia, "Iowan Old Style", "Times New Roman", serif`;
+  x.textBaseline="alphabetic";
+  const wrap=(text,maxW)=>{
+    const words=text.split(" "); const lines=[]; let cur="";
+    for(const wd of words){
+      const test = cur ? cur+" "+wd : wd;
+      if(x.measureText(test).width>maxW && cur){ lines.push(cur); cur=wd; } else cur=test;
+    }
+    if(cur) lines.push(cur);
+    return lines;
+  };
+  const lines=wrap("“"+d.quote+"”", colW);
+  const lh=qSize*1.36;
+  let ty = stacked ? pad+qSize : (h-(lines.length-1)*lh)/2 + qSize*0.34;
+  for(const ln of lines){ x.fillText(ln, pad, ty); ty+=lh; }
+
+  const mSize=Math.max(11, Math.round(h*0.052));
+  const avR  =Math.max(14, Math.round(h*0.075));
+  let ax, ay;
+  if(stacked){
+    ay = h-pad-avR*0.2;
+    x.strokeStyle="rgba(186,164,130,.55)"; x.lineWidth=1;
+    x.beginPath(); x.moveTo(pad, ay-avR*1.9); x.lineTo(w-pad, ay-avR*1.9); x.stroke();
+    ax = pad+avR;
+  } else {
+    const cx0 = pad+colW+Math.round(w*0.05);
+    x.strokeStyle="rgba(186,164,130,.55)"; x.lineWidth=1;
+    x.beginPath(); x.moveTo(cx0-Math.round(w*0.028), h*0.28); x.lineTo(cx0-Math.round(w*0.028), h*0.72); x.stroke();
+    ax = cx0+avR; ay = h*0.47;
+  }
+  x.fillStyle=d.tint;
+  x.beginPath(); x.arc(ax, ay-avR*0.1, avR, 0, Math.PI*2); x.fill();
+  x.fillStyle="#fff";
+  x.font=`600 ${Math.round(avR*0.82)}px -apple-system, system-ui, sans-serif`;
+  x.textAlign="center";
+  x.fillText(d.name.split(" ").map(s=>s[0]).join("").slice(0,2), ax, ay-avR*0.1+avR*0.29);
+  x.textAlign="left";
+
+  const tx=ax+avR+Math.round(avR*0.55);
+  x.fillStyle="#2A211A";
+  x.font=`600 ${mSize}px -apple-system, system-ui, sans-serif`;
+  x.fillText(d.name, tx, ay-mSize*0.25);
+  x.fillStyle="#6B5C4C";
+  x.font=`${Math.round(mSize*0.92)}px -apple-system, system-ui, sans-serif`;
+  x.fillText(d.role, tx, ay+mSize*0.95);
+  x.fillStyle="#C2603C";
+  x.font=`${Math.round(mSize*0.95)}px -apple-system, system-ui, sans-serif`;
+  const stars="★".repeat(d.stars)+"☆".repeat(5-d.stars);
+  if(stacked) x.fillText(stars, w-pad-x.measureText(stars).width, ay+mSize*0.2);
+  else        x.fillText(stars, tx, ay+mSize*2.2);
+
+  const t=new THREE.CanvasTexture(c);
+  t.colorSpace=THREE.SRGBColorSpace;
+  t.anisotropy=renderer.capabilities.getMaxAnisotropy();
+  return t;
+}
+
+/* a grid whose vertices are written in world space every frame */
+function makeCloth(segX, segY){
+  const geo=new THREE.BufferGeometry();
+  const nx=segX+1, ny=segY+1, count=nx*ny;
+  const pos=new Float32Array(count*3), uv=new Float32Array(count*2), idx=[];
+  for(let j=0;j<ny;j++) for(let i=0;i<nx;i++){
+    const k=(j*nx+i)*2; uv[k]=i/segX; uv[k+1]=1-j/segY;    // texture top row at j = 0
+  }
+  for(let j=0;j<segY;j++) for(let i=0;i<segX;i++){
+    const a=j*nx+i, b=j*nx+i+1, c=(j+1)*nx+i+1, d=(j+1)*nx+i;
+    idx.push(a,b,d, b,c,d);
+  }
+  geo.setAttribute("position", new THREE.BufferAttribute(pos,3));
+  geo.setAttribute("uv", new THREE.BufferAttribute(uv,2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return { geo, nx, ny, segX, segY };
+}
+
+const cards = DATA.map((d,i) => {
+  const cloth = makeCloth(CFG.card.segX, CFG.card.segY);
+  const mat = new THREE.MeshPhysicalMaterial({
+    roughness:0.86, sheen:0.5, sheenColor:0xFFF3E0, sheenRoughness:0.7,
+    side:THREE.DoubleSide, clearcoat:0.05,
+  });
+  const mesh = new THREE.Mesh(cloth.geo, mat);
+  mesh.castShadow = true;
+  mesh.frustumCulled = false;
+  scene.add(mesh);
+
+  const threadL = segment(MAT.thread, 10, 1.1, 1.1);
+  const threadR = segment(MAT.thread, 10, 1.1, 1.1);
+  const ringL = new THREE.Mesh(GEO.ring, MAT.ring);
+  const ringR = new THREE.Mesh(GEO.ring, MAT.ring);
+  ringL.castShadow = ringR.castShadow = true;
+  scene.add(threadL, threadR, ringL, ringR);
+
+  const li=document.createElement("li");
+  li.textContent = `${d.name}, ${d.role}: “${d.quote}”`;
+  srList.append(li);
+
+  return { d, cloth, mesh, mat, threadL, threadR, ringL, ringR,
+           theta:0, thetaV:0, pmx:0, pvx:0, phase:i*1.9, tex:null, visible:true };
+});
+
+const dots = DATA.map((d,i) => {
+  const b=document.createElement("button");
+  b.className="dot"; b.type="button"; b.role="tab";
+  b.setAttribute("aria-label", `Testimonial ${i+1}: ${d.name}`);
+  b.addEventListener("click", () => goTo(i));
+  dotsWrap.append(b);
+  return b;
+});
+
+/* =====================================================================
+   CHARACTER
+   ===================================================================== */
+const RIG = {
+  hipF:{x:6,y:-2},  hipB:{x:-14,y:-6},
+  shF:{x:26,y:-64}, shB:{x:4,y:-70},
+  headRel:{x:14,y:-116},
+  tailRel:{x:-30,y:-16},
+  foreheadRel:{x:40,y:-150},
+  armUp:34, armFore:30, handR:9.5,
+  legUp:40, legLo:34,
+  headR:33,
+};
+const rig = {};
+function buildMouse(){
+  const root = new THREE.Group();
+
+  /* torso: one lathed surface, so there is no seam between chest and haunch */
+  const profile = [[0.1,-98],[9,-94],[15,-88],[21,-78],[27,-64],[32,-48],[35,-30],[36,-10],[34,8],[29,22],[21,34],[10,43],[0.1,47]]
+    .map(([r,y]) => new THREE.Vector2(r, -y));
+  const torso = new THREE.Group();
+  const torsoMesh = new THREE.Mesh(new THREE.LatheGeometry(profile, 28), MAT.fur);
+  torsoMesh.scale.set(1,1,0.94);
+  torsoMesh.castShadow = true;
+  torso.add(torsoMesh);
+  torso.add(ball(MAT.belly, 24, 30, 20, 11, -34, 18));      // chest/belly patch
+  root.add(torso);
+
+  /* head: skull + lathed snout, so the muzzle is continuous with the face */
+  const head = new THREE.Group();
+  head.add(ball(MAT.fur, RIG.headR, RIG.headR*0.97, RIG.headR*0.93, 0,0,0));
+  const snoutProfile = [[0.4,0],[7,4],[11,10],[13.5,18],[13,27],[9,33],[3,36]].map(([r,l]) => new THREE.Vector2(r,l));
+  const snout = new THREE.Mesh(new THREE.LatheGeometry(snoutProfile, 20), MAT.belly);
+  snout.rotation.z = Math.PI/2;
+  snout.rotation.x = 0.1;
+  snout.position.set(20, -4, 6);
+  snout.scale.set(1.5, 1, 1.05);
+  snout.castShadow = true;
+  head.add(snout);
+  head.add(ball(MAT.nose, 5.6, 4.9, 5.2, 45, 2, 8));
+  head.add(ball(MAT.fur, 15, 13, 14, 6, -6, 0));
+
+  const mkEar = (rOut, rIn, tilt, sign) => {
+    const g=new THREE.Group();
+    g.add(ball(MAT.fur, rOut, rOut*1.04, rOut*0.34, 0,0,0));
+    g.add(ball(MAT.ear, rIn, rIn*1.04, rIn*0.3, 0,0, rOut*0.22*sign));
+    g.rotation.y = tilt;
+    return g;
+  };
+  const earL = mkEar(23, 15.5,  0.55,  1);
+  const earR = mkEar(20, 13.5, -0.75, -1);
+  at(earL, 2, -30, 15); at(earR, -12, -32, -13);
+  head.add(earL, earR);
+
+  function eyeAt(dx,dy,dz,r){
+    const g=new THREE.Group();
+    g.add(ball(MAT.eye,   r, r*1.1, r, 0,0,0));
+    g.add(ball(MAT.pupil, r*0.5, r*0.54, r*0.5, 0,0,0));
+    g.add(ball(MAT.eye,   r*0.19, r*0.19, r*0.19, 0,0,0));
+    const v=new THREE.Vector3(dx,-dy,dz).normalize();
+    g.position.copy(v.clone().multiplyScalar(24.5));
+    g.children[1].position.set(0, -r*0.06, r*0.8);
+    g.children[2].position.set(-r*0.22, r*0.3, r*1.0);
+    g.lookAt(g.position.clone().add(v));
+    return g;
+  }
+  const eyeL = eyeAt(0.62,-0.24, 0.72, 9.5);
+  const eyeR = eyeAt(0.50,-0.28,-0.74, 8.2);
+  head.add(eyeL, eyeR);
+
+  const browL = ball(MAT.dark, 8.5, 2.3, 3, 20, -19, 20);
+  const browR = ball(MAT.dark, 7.5, 2.1, 3, 4, -22, -18);
+  const mouth = ball(MAT.mouth, 5.5, 3.6, 4.5, 33, 13, 10);
+  head.add(browL, browR, mouth);
+  for(const [a,zz] of [[-0.3,13],[0.0,15],[0.3,11]]){
+    const w=new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.7,34,5), MAT.dark);
+    w.rotation.z = -Math.PI/2 + a; w.rotation.y = -0.5;
+    at(w, 44, 4, zz);
+    head.add(w);
+  }
+  root.add(head);
+
+  const armF = { upper: segment(MAT.fur,   RIG.armUp,  9.5, 7.6), lower: segment(MAT.fur,   RIG.armFore, 7.6, 6.2) };
+  const armB = { upper: segment(MAT.furDk, RIG.armUp,  9.0, 7.2), lower: segment(MAT.furDk, RIG.armFore, 7.2, 5.8) };
+  const legF = { upper: segment(MAT.fur,   RIG.legUp, 13.5,10.5), lower: segment(MAT.fur,   RIG.legLo,  10.5, 8.0) };
+  const legB = { upper: segment(MAT.furDk, RIG.legUp, 12.5, 9.8), lower: segment(MAT.furDk, RIG.legLo,   9.8, 7.4) };
+  const handF = new THREE.Group(); handF.add(ball(MAT.hand, RIG.handR, RIG.handR, RIG.handR*0.9, 0,0,0));
+  const handB = new THREE.Group(); handB.add(ball(MAT.hand, RIG.handR*0.92, RIG.handR*0.92, RIG.handR*0.8, 0,0,0));
+  const footF = new THREE.Group(); footF.add(ball(MAT.furDk, 16, 8, 11, 5,0,0));
+  const footB = new THREE.Group(); footB.add(ball(MAT.furDk, 15, 7.5, 10, 5,0,0));
+  root.add(armF.upper, armF.lower, armB.upper, armB.lower, handF, handB,
+           legF.upper, legF.lower, legB.upper, legB.lower, footF, footB);
+
+  const tail = makeTube(18, 8, MAT.furDk);
+  scene.add(tail.mesh);
+
+  Object.assign(rig, { root, torso, head, earL, earR, eyeL, eyeR, browL, browR, mouth,
+                       armF, armB, handF, handB, legF, legB, footF, footB, tail });
+  scene.add(root);
+}
+buildMouse();
+
+/* parts are positioned in stage px but modelled in design px, so each carries the K scale */
+function scaleRig(){
+  const parts=[rig.head, rig.handF, rig.handB, rig.footF, rig.footB,
+               rig.armF.upper, rig.armF.lower, rig.armB.upper, rig.armB.lower,
+               rig.legF.upper, rig.legF.lower, rig.legB.upper, rig.legB.lower];
+  for(const p of parts) p.scale.setScalar(K);
+  rig.torso.scale.setScalar(K);
+}
+
+const strain = [];
+for(let i=0;i<3;i++){
+  const mat=new THREE.MeshBasicMaterial({ color:0xC2603C, transparent:true, opacity:0 });
+  const m=new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,12,6), mat);
+  scene.add(m); strain.push({ m, mat });
+}
+const sweat = [];
+for(let i=0;i<20;i++){
+  const mat=MAT.drop.clone();
+  const m=new THREE.Mesh(GEO.ball, mat);
+  m.visible=false; scene.add(m);
+  sweat.push({ m, mat, life:0, x:0, y:0, z:0, vx:0, vy:0, r:4 });
+}
+
+/* =====================================================================
+   LAYOUT
+   ===================================================================== */
+let W=0,H=0,K=1, hips={x:0,y:0}, gripPoint={x:0,y:0};
+let cardW=0, cardH=0, step=0, span=0, threadLen=0, s0=0, ropeRestLen=0, lenRatio=1;
+let anchorBase={x:0,y:0}, anchorR={x:0,y:0}, anchorL={x:0,y:0};
+const rope = { pts:[], cum:[], seg:0 };
+
+function layout(){
+  const w=stage.clientWidth, h=stage.clientHeight;
+  if(w<120 || h<120) return false;
+  W=w; H=h;
+  const narrow = W<760;
+
+  cardW = W * (narrow ? 0.68 : 0.72);
+  cardH = H * (narrow ? 0.48 : 0.50);
+  const gap = W * (narrow ? 0.028 : 0.032);
+  step = cardW + gap;
+  span = cardW - CFG.card.ringInset*2;
+  threadLen = H * 0.05;
+
+  const lineY = H * (narrow ? 0.185 : 0.17);
+  gripPoint  = { x: W * (narrow ? 0.25 : 0.135), y: lineY };
+  anchorBase = { ...gripPoint };
+  anchorR    = { x: W + cardW + 260, y: lineY - H*0.03 };
+  anchorL    = { ...anchorBase };
+
+  /* he is placed *from* the line: hips wherever his shoulders can reach the rope with a
+     natural bent arm, which also lands his head just above it */
+  K = H * (narrow ? 0.0019 : 0.0024);
+  const reach = (RIG.armUp + RIG.armFore) * K;
+  hips = { x: gripPoint.x - 0.78*reach - RIG.shF.x*K, y: lineY + (-RIG.shF.y)*K + 0.46*reach };
+  scaleRig();
+
+  const camDist = (H/2) / Math.tan((camera.fov*Math.PI/180)/2);
+  camera.aspect = W/H;
+  camera.position.set(0,0,camDist);
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(devicePixelRatio||1, 2));
+  renderer.setSize(W,H,false);
+
+  key.position.set(-0.55*W, 0.75*H, 820);
+  const sc=key.shadow.camera;
+  sc.left=-W*0.9; sc.right=W*0.9; sc.top=H*0.9; sc.bottom=-H*0.9; sc.near=100; sc.far=3000;
+  sc.updateProjectionMatrix();
+  fill.position.set(0.9*W, 0.1*H, 480);
+  rim.position.set(0.25*W, -0.55*H, -380);
+  wall.position.set(0,0,-150);
+  wall.scale.set(W*2.4, H*2.4, 1);
+
+  const N=CFG.rope.points;
+  rope.pts.length=0;
+  for(let i=0;i<N;i++){
+    const t=i/(N-1);
+    const x=lerp(anchorBase.x, anchorR.x, t);
+    const y=lerp(anchorBase.y, anchorR.y, t) + Math.sin(Math.PI*t)*H*CFG.rope.sag;
+    rope.pts.push({x,y,px:x,py:y,fx:0,fy:0,pin:(i===0||i===N-1)});
+  }
+  const straight=Math.hypot(anchorR.x-anchorBase.x, anchorR.y-anchorBase.y);
+  rope.seg=(straight/(N-1))*CFG.rope.slack;
+  ropeRestLen=rope.seg*(N-1);
+  lenRatio=ropeRestLen/(anchorR.x-anchorBase.x);
+  const activeCX = W*(narrow?0.14:0.075) + cardW/2;
+  s0 = (activeCX-anchorBase.x)*lenRatio;
+
+  const dpr = Math.min(devicePixelRatio||1, 2) * 1.35;
+  for(const c of cards){
+    if(c.tex) c.tex.dispose();
+    c.tex = paintCard(c.d, cardW, cardH, dpr);
+    c.mat.map = c.tex;
+    c.mat.needsUpdate = true;
+  }
+  buildCum();
+  return true;
+}
+
+/* =====================================================================
+   ROPE SIM
+   ===================================================================== */
+function buildCum(){
+  const p=rope.pts; rope.cum=[0];
+  for(let i=1;i<p.length;i++) rope.cum[i]=rope.cum[i-1]+Math.hypot(p[i].x-p[i-1].x, p[i].y-p[i-1].y);
+}
+function atLength(s){
+  const p=rope.pts, cum=rope.cum, n=p.length;
+  if(s<=0){
+    const dx=p[1].x-p[0].x, dy=p[1].y-p[0].y, d=Math.hypot(dx,dy)||1;
+    return { x:p[0].x+dx/d*s, y:p[0].y+dy/d*s, ang:Math.atan2(dy,dx), i:0, t:0 };
+  }
+  const total=cum[n-1];
+  if(s>=total){
+    const dx=p[n-1].x-p[n-2].x, dy=p[n-1].y-p[n-2].y, d=Math.hypot(dx,dy)||1, o=s-total;
+    return { x:p[n-1].x+dx/d*o, y:p[n-1].y+dy/d*o, ang:Math.atan2(dy,dx), i:n-2, t:1 };
+  }
+  let lo=0, hi=n-1;
+  while(hi-lo>1){ const mid=(lo+hi)>>1; if(cum[mid]<=s) lo=mid; else hi=mid; }
+  const segLen=cum[lo+1]-cum[lo]||1, t=(s-cum[lo])/segLen, a=p[lo], b=p[lo+1];
+  return { x:lerp(a.x,b.x,t), y:lerp(a.y,b.y,t), ang:Math.atan2(b.y-a.y,b.x-a.x), i:lo, t };
+}
+const LOAD_KERNEL=[0.34,0.22,0.22,0.11,0.11], LOAD_OFF=[0,-1,1,-2,2];
+function addForceAt(loc, fx, fy){
+  const p=rope.pts, n=p.length, i=loc.i, t=loc.t;
+  for(let k=0;k<LOAD_KERNEL.length;k++){
+    const wgt=LOAD_KERNEL[k], o=LOAD_OFF[k], a=i+o, b=i+1+o;
+    if(a>0&&a<n-1){ p[a].fx+=fx*(1-t)*wgt; p[a].fy+=fy*(1-t)*wgt; }
+    if(b>0&&b<n-1){ p[b].fx+=fx*t*wgt;     p[b].fy+=fy*t*wgt; }
+  }
+}
+function stepRope(dt, gustNow, tension){
+  const p=rope.pts, dt2=dt*dt, g=CFG.rope, last=p.length-1;
+  p[0].x=anchorL.x; p[0].y=anchorL.y; p[0].px=anchorL.x; p[0].py=anchorL.y;
+  p[last].x=anchorR.x; p[last].y=anchorR.y; p[last].px=anchorR.x; p[last].py=anchorR.y;
+  const sagAmp=H*g.sag;
+  for(let i=1;i<last;i++){
+    const q=p[i], t=i/last;
+    const bx=lerp(anchorL.x, anchorR.x, t);
+    const by=lerp(anchorL.y, anchorR.y, t)+Math.sin(Math.PI*t)*sagAmp;
+    const wx=gustNow*g.windX*(0.85+0.55*Math.sin(T*1.7+q.x*0.011));
+    const wy=gustNow*g.windY*Math.sin(T*2.3+q.x*0.019);
+    const ax=q.fx+wx+(bx-q.x)*g.stiff;
+    const ay=q.fy+wy+g.gravity+(by-q.y)*g.stiff;
+    const vxx=(q.x-q.px)*g.damp, vyy=(q.y-q.py)*g.damp;
+    q.px=q.x; q.py=q.y;
+    q.x+=vxx+ax*dt2; q.y+=vyy+ay*dt2;
+    q.fx=0; q.fy=0;
+  }
+  const rest=rope.seg*(1-tension*0.022);
+  for(let k=0;k<g.iterations;k++) for(let i=0;i<last;i++){
+    const a=p[i], b=p[i+1];
+    let dx=b.x-a.x, dy=b.y-a.y, d=Math.hypot(dx,dy); if(d===0) d=1e-4;
+    const diff=(d-rest)/d*0.5, ox=dx*diff, oy=dy*diff;
+    if(!a.pin){ a.x+=ox; a.y+=oy; }
+    if(!b.pin){ b.x-=ox; b.y-=oy; }
+  }
+  const sm=0.16;
+  for(let i=1;i<last;i++){
+    const q=p[i], a=p[i-1], b=p[i+1];
+    q.x+=((a.x+b.x)*0.5-q.x)*sm;
+    q.y+=((a.y+b.y)*0.5-q.y)*sm;
+  }
+  buildCum();
+}
+
+const _linePts=[], _freePts=[], _tailPts=[];
+for(let i=0;i<CFG.rope.points;i++) _linePts.push({x:0,y:0,z:0});
+for(let i=0;i<26;i++) _freePts.push({x:0,y:0,z:0});
+for(let i=0;i<18;i++) _tailPts.push({x:0,y:0,z:0});
+
+function drawRope(){
+  for(let i=0;i<rope.pts.length;i++){
+    const p=rope.pts[i], o=_linePts[i];
+    o.x=vx(p.x); o.y=vy(p.y); o.z=0;
+  }
+  updateTube(line, _linePts, CFG.rope.radius);
+
+  /* the free end: from his gripping fist it drops behind him and leaves the lower-left */
+  const a=anchorL, f=fistW;
+  const sway=Math.sin(T*1.15)*7 + tugPulse*10;
+  const drop=H*0.32 + sway;
+  const c1={x:f.x-26-tugPulse*14, y:f.y+drop*0.55}, c2={x:W*0.05, y:f.y+drop*1.25}, p3={x:-W*0.05, y:H*0.92};
+  for(let i=0;i<_freePts.length;i++){
+    const t=i/(_freePts.length-1);
+    let x,y;
+    if(t<0.18){ const k=t/0.18; x=lerp(a.x,f.x,k); y=lerp(a.y,f.y,k); }
+    else {
+      const k=(t-0.18)/0.82, m=1-k;
+      x = m*m*m*f.x + 3*m*m*k*c1.x + 3*m*k*k*c2.x + k*k*k*p3.x;
+      y = m*m*m*f.y + 3*m*m*k*c1.y + 3*m*k*k*c2.y + k*k*k*p3.y;
+    }
+    _freePts[i].x=vx(x); _freePts[i].y=vy(y); _freePts[i].z=-30+40*Math.sin(t*2.2);
+  }
+  updateTube(freeEnd, _freePts, CFG.rope.radius*0.94);
+}
+
+/* =====================================================================
+   CAROUSEL STATE
+   ===================================================================== */
+let scroll=0, scrollV=0, target=0, index=0;
+let T=0, u=0, effort=0, effortS=0, tugPulse=0;
+let gust=0.34, gustTarget=0.34, nextGust=2;
+let blinkAt=1.6, blink=0, earTwitch=0, nextTwitch=3;
+let sweatTimer=0, foreheadAbs={x:150,y:100};
+let fistW={x:0,y:0}, fistBackW={x:0,y:0};
+const drag={active:false,id:null,x0:0,scroll0:0,dx:0,lastX:0,lastT:0,vel:0,moved:false};
+
+function goTo(i){ target=i*step; announce(i); }
+function nudge(dir){ target+=dir*step; announce(Math.round(target/step)); }
+function announce(i){
+  const k=((i%DATA.length)+DATA.length)%DATA.length;
+  statusEl.textContent = `${DATA[k].name}, ${DATA[k].role}: ${DATA[k].quote}`;
+}
+document.getElementById("prev").addEventListener("click", () => { nudge(-1); killHint(); });
+document.getElementById("next").addEventListener("click", () => { nudge(1);  killHint(); });
+stage.addEventListener("keydown", e => {
+  if(e.key==="ArrowLeft"){ nudge(-1); killHint(); e.preventDefault(); }
+  if(e.key==="ArrowRight"){ nudge(1);  killHint(); e.preventDefault(); }
+});
+function killHint(){ hintEl.classList.add("is-gone"); }
+stage.addEventListener("pointerdown", e => {
+  if(drag.active) return;
+  drag.active=true; drag.id=e.pointerId;
+  drag.x0=e.clientX; drag.scroll0=scroll; drag.dx=0; drag.moved=false;
+  drag.lastX=e.clientX; drag.lastT=performance.now(); drag.vel=0;
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener("pointermove", e => {
+  if(!drag.active || e.pointerId!==drag.id) return;
+  drag.dx=e.clientX-drag.x0;
+  if(Math.abs(drag.dx)>4){ drag.moved=true; killHint(); }
+  const now=performance.now(), dt=Math.max(8, now-drag.lastT);
+  drag.vel=(e.clientX-drag.lastX)/dt*1000;
+  drag.lastX=e.clientX; drag.lastT=now;
+  scroll=drag.scroll0-drag.dx;
+  target=scroll;
+});
+function endDrag(e){
+  if(!drag.active || (e && e.pointerId!==drag.id)) return;
+  drag.active=false;
+  const frac=-drag.dx/step;
+  let i=Math.round(drag.scroll0/step);
+  if(Math.abs(drag.vel)>CFG.motion.flickThreshold) i += drag.vel<0 ? 1 : -1;
+  else if(Math.abs(frac)>CFG.motion.dragThreshold)  i += frac>0 ? 1 : -1;
+  target=i*step;
+  announce(i);
+}
+stage.addEventListener("pointerup", endDrag);
+stage.addEventListener("pointercancel", endDrag);
+
+/* =====================================================================
+   POSE  (screen px, y down; a screen angle a becomes rotation.z of -a)
+   ===================================================================== */
+function ik(sx,sy,tx,ty,l1,l2,bend){
+  let dx=tx-sx, dy=ty-sy, d=Math.hypot(dx,dy);
+  d=clamp(d, Math.abs(l1-l2)+0.01, l1+l2-0.01);
+  const a=Math.atan2(dy,dx);
+  const A=Math.acos(clamp((d*d+l1*l1-l2*l2)/(2*d*l1),-1,1));
+  const up=a-A*bend;
+  const ex=sx+Math.cos(up)*l1, ey=sy+Math.sin(up)*l1;
+  return { up, fore:Math.atan2(ty-ey,tx-ex), ex, ey };
+}
+function place(chain, endGroup, S, targetPt, l1, l2, bend, z){
+  const {up,fore,ex,ey}=ik(S.x,S.y,targetPt.x,targetPt.y,l1*K,l2*K,bend);
+  chain.upper.position.set(vx(S.x), vy(S.y), z);
+  chain.upper.rotation.z = -up;
+  chain.lower.position.set(vx(ex), vy(ey), z);
+  chain.lower.rotation.z = -fore;
+  const hx=ex+Math.cos(fore)*l2*K, hy=ey+Math.sin(fore)*l2*K;
+  if(endGroup){
+    endGroup.position.set(vx(hx), vy(hy), z);
+    endGroup.rotation.z=-fore;
+    endGroup.scale.setScalar(K);
+  }
+  return {x:hx, y:hy};
+}
+function handStroke(phase){
+  const p=((phase%1)+1)%1, pullEnd=0.58;
+  if(p<pullEnd){
+    const k=easeIO(p/pullEnd);
+    return { t:lerp(34,-26,k), lift:0, grip:1, drive:Math.sin(Math.PI*(p/pullEnd)) };
+  }
+  const k=easeIO((p-pullEnd)/(1-pullEnd));
+  return { t:lerp(-26,34,k), lift:Math.sin(Math.PI*k)*13, grip:0, drive:0 };
+}
+
+function poseJerry(dt){
+  const E=effortS, grip=gripPoint;
+  let hx=anchorR.x-grip.x, hy=anchorR.y-grip.y;
+  const hlen=Math.hypot(hx,hy)||1, rdx=hx/hlen, rdy=hy/hlen, pdx=-rdy, pdy=rdx;
+
+  const A=handStroke(u), B=handStroke(u+0.5);
+  const handF={ x:grip.x+rdx*A.t*K+pdx*(-A.lift*K), y:grip.y+rdy*A.t*K+pdy*(-A.lift*K) };
+  const handB={ x:grip.x+rdx*B.t*K+pdx*(3-B.lift)*K, y:grip.y+rdy*B.t*K+pdy*(3-B.lift)*K+3*K };
+
+  const stroke=Math.max(A.drive,B.drive);
+  const lean=(0.16+0.24*E)*(0.5+0.5*stroke);
+  const breathe=Math.sin(T*2.1)*0.02*(1-E*0.6);
+  const sink=(2+12*E)*(0.4+0.6*stroke)*K;
+  const hip={ x:hips.x-Math.sin(lean)*6*K, y:hips.y+sink };
+
+  rig.torso.position.set(vx(hip.x), vy(hip.y), 0);
+  rig.torso.rotation.z=lean;
+  rig.torso.rotation.y=-0.26+Math.sin(T*0.7)*0.03;
+  rig.torso.scale.set(K, K*(1+breathe), K);
+
+  const bodyM = (pt) => {
+    const c=Math.cos(-lean), sn=Math.sin(-lean);
+    return { x: hip.x + (pt.x*c - pt.y*sn)*K, y: hip.y + (pt.x*sn + pt.y*c)*K };
+  };
+
+  const headP=bodyM(RIG.headRel);
+  const headTilt=(0.06+0.16*E)*(0.5+0.5*stroke);
+  rig.head.position.set(vx(headP.x), vy(headP.y), 0);
+  rig.head.rotation.z=lean*0.55+headTilt;
+  rig.head.rotation.y=-0.30+Math.sin(T*0.9)*0.04-E*0.05;
+  rig.head.rotation.x=-0.05-E*0.10;
+
+  const squint=clamp(1-E*0.5-blink, 0.08, 1);
+  rig.eyeL.scale.set(1,squint,1);
+  rig.eyeR.scale.set(1,squint,1);
+  rig.browL.position.y=19-5.5*E; rig.browL.rotation.z=-0.32*E;
+  rig.browR.position.y=22-5*E;   rig.browR.rotation.z=-0.28*E;
+  rig.mouth.scale.set(1+E*0.45, 1+E*1.5, 1+E*0.3);
+  rig.earL.rotation.z=earTwitch*0.22-E*0.16;
+  rig.earR.rotation.z=earTwitch*0.16-E*0.13;
+
+  const fistF=place(rig.armF, rig.handF, bodyM(RIG.shF), handF, RIG.armUp, RIG.armFore, -1, 30*K);
+  const fistB=place(rig.armB, rig.handB, bodyM(RIG.shB), handB, RIG.armUp, RIG.armFore, -1, -30*K);
+
+  const spread=1+E*0.2;
+  const hipFA=bodyM(RIG.hipF), hipBA=bodyM(RIG.hipB);
+  /* no floor out here: both legs stay straight and brace off the frame edge, which reads
+     as leaning in rather than as two folded stubs */
+  const footFT={ x:-W*0.03-4*E, y:hips.y+(70+10*E)*spread*K };
+  const footBT={ x:-W*0.07,     y:hips.y+(24+10*E)*spread*K };
+  place(rig.legF, rig.footF, hipFA, footFT, RIG.legUp, RIG.legLo, 1,  34*K);
+  place(rig.legB, rig.footB, hipBA, footBT, RIG.legUp, RIG.legLo, 1, -30*K);
+
+  /* tail: swept tube streaming back off the frame with a travelling wave */
+  let tp=bodyM(RIG.tailRel), ta=Math.PI*0.94-lean*0.5;
+  const segLen=13*K;
+  for(let i=0;i<_tailPts.length;i++){
+    _tailPts[i].x=vx(tp.x); _tailPts[i].y=vy(tp.y); _tailPts[i].z=-20*K;
+    tp={ x: tp.x+Math.cos(ta)*segLen, y: tp.y+Math.sin(ta)*segLen };
+    ta += -0.09-0.07*E + Math.sin(T*4.2-i*0.6)*(0.07+0.11*E);
+  }
+  updateTube(rig.tail, _tailPts, 6.5*K, t => 1-t*0.78);
+
+  const sOp=clamp((E-0.42)*2.2, 0, 0.85);
+  const temple=bodyM({x:RIG.foreheadRel.x-6, y:RIG.foreheadRel.y-6});
+  for(let i=0;i<strain.length;i++){
+    const {m,mat}=strain[i];
+    mat.opacity=sOp;
+    m.scale.setScalar(K);
+    m.position.set(vx(temple.x+(i-1)*13*K), vy(temple.y-14*K-Math.abs(i-1)*5*K), 30*K);
+    m.rotation.z=-(0.42*(i-1));
+  }
+
+  tugPulse=stroke*E;
+  const yank=CFG.rope.tugAmp*tugPulse;
+  anchorL.x=anchorBase.x-rdx*yank;
+  anchorL.y=anchorBase.y-rdy*yank;
+
+  const gw=A.grip+B.grip||1;
+  fistW.x=(fistF.x*A.grip+fistB.x*B.grip)/gw;
+  fistW.y=(fistF.y*A.grip+fistB.y*B.grip)/gw;
+  fistBackW.x=Math.min(fistF.x,fistB.x); fistBackW.y=Math.max(fistF.y,fistB.y);
+
+  foreheadAbs=bodyM(RIG.foreheadRel);
+  if(!reduced){
+    sweatTimer-=dt;
+    if(E>0.40 && sweatTimer<=0){ sweatTimer=lerp(0.24,0.10,E); spawnSweat(E); }
+  }
+}
+function spawnSweat(E){
+  const d=sweat.find(s=>s.life<=0); if(!d) return;
+  d.x=foreheadAbs.x+(Math.random()*14-7)*K;
+  d.y=foreheadAbs.y+(Math.random()*10-4)*K;
+  d.z=(14+Math.random()*18)*K;
+  d.vx=(50+Math.random()*110)*(0.6+E)*K;
+  d.vy=(-100-Math.random()*120)*(0.6+E)*K;
+  d.life=0.85+Math.random()*0.45;
+  d.r=(2.8+Math.random()*1.8)*K;
+  d.m.visible=true;
+}
+function stepParticles(dt){
+  for(const d of sweat){
+    if(d.life<=0){ if(d.m.visible) d.m.visible=false; continue; }
+    d.life-=dt; d.vy+=1000*dt*K;
+    d.x+=d.vx*dt; d.y+=d.vy*dt;
+    d.mat.opacity=0.92*clamp(d.life*1.5,0,1);
+    const stretch=clamp(1+Math.abs(d.vy)/(900*K),1,1.8);
+    d.m.position.set(vx(d.x), vy(d.y), d.z);
+    d.m.scale.set(d.r, d.r*stretch, d.r);
+    d.m.rotation.z=-Math.atan2(d.vy,d.vx)-Math.PI/2;
+  }
+}
+
+/* =====================================================================
+   CLOTH: hang each card off the line, blow wind through it
+   ===================================================================== */
+function placeCards(dt){
+  const total=DATA.length*step;
+  /* wind energy: ambient gust plus whatever Jerry is putting into the line */
+  const windE=clamp(0.34 + gust*0.7 + effortS*0.8, 0, 1.35);  // always a live breeze
+
+  for(let ci=0; ci<cards.length; ci++){
+    const c=cards[ci];
+    const k=Math.round((scroll-ci*step)/total);
+    const sMid=s0+(ci*step+k*total-scroll)*lenRatio;
+    const half=span*0.5*lenRatio;
+    const aL=atLength(sMid-half), aR=atLength(sMid+half);
+    const midX=(aL.x+aR.x)/2;
+
+    if(midX < -cardW*1.15 || midX > W+cardW*1.4){
+      if(c.visible){ c.visible=false; c.mesh.visible=false; c.threadL.visible=c.threadR.visible=false; c.ringL.visible=c.ringR.visible=false; }
+      c.pmx=midX; continue;
+    }
+    if(!c.visible){ c.visible=true; c.mesh.visible=true; c.threadL.visible=c.threadR.visible=true; c.ringL.visible=c.ringR.visible=true; c.pmx=midX; c.theta=0; c.thetaV=0; }
+
+    const ropeAng=Math.atan2(aR.y-aL.y, aR.x-aL.x);
+
+    /* both loops swing together, so the threads stay parallel */
+    const vxx=(midX-c.pmx)/dt, acc=(vxx-c.pvx)/dt;
+    c.pvx=vxx; c.pmx=midX;
+    if(!reduced){
+      const windTorque=gust*2.6*(0.7+0.5*Math.sin(T*1.9+c.phase));
+      c.thetaV += (-CFG.card.swingK*c.theta - CFG.card.swingDamp*c.thetaV
+                   - acc*CFG.card.swingInertia + windTorque)*dt;
+      c.theta=clamp(c.theta+c.thetaV*dt, -CFG.card.maxSwing, CFG.card.maxSwing);
+    } else c.theta=0;
+
+    const downAng=ropeAng*0.55+Math.PI/2+c.theta;
+    const dnx=Math.cos(downAng), dny=Math.sin(downAng);   // "down" for this card
+    const sdx=-dny, sdy=dnx;                              // along its width
+
+    /* cloth vertices: u across the width, v down from the pinned top edge */
+    const cl=c.cloth, pos=cl.geo.attributes.position.array;
+    /* amplitude and ripple count come off the card's width, not its height: a tall narrow
+       phone card gets the same gentle billow instead of a shredded one */
+    const amp=Math.min(cardH*CFG.card.waveAmp, cardW*0.085)*clamp(windE,0,1.6);
+    const lenU=clamp(3.2*(cardW/cardH), 5, CFG.card.waveLenU);
+    const ph0=T*CFG.card.waveSpeed+c.phase;
+    const spanArc=span*lenRatio;
+    for(let i=0;i<=cl.segX;i++){
+      const uu=i/cl.segX;
+      /* the top edge rides the actual rope curve between the two loops */
+      const top=atLength(sMid-half+uu*spanArc);
+      const uEnv=Math.sin(Math.PI*uu);                    // zero at the pinned corners
+      for(let j=0;j<=cl.segY;j++){
+        const vv=j/cl.segY;
+        const dist=threadLen+vv*cardH;
+        let px=top.x+dnx*dist, py=top.y+dny*dist, pz=0;
+        if(!reduced){
+          /* ramps away from the pinned top edge and corners, but never fully dies, so
+             folds travel through the whole cloth instead of only the hem */
+          const env=(0.12+0.88*Math.pow(vv,0.95))*(0.25+0.75*uEnv);
+          const phase=ph0+uu*lenU-vv*CFG.card.waveLenV;
+          const w1=Math.sin(phase), w2=Math.sin(phase*1.73+1.1);
+          pz=amp*env*(w1*0.90+w2*0.34) + vv*vv*16;   // + the natural forward bow of hanging cloth
+          /* billowing shortens the cloth in plane and lifts the free edge */
+          /* in-plane billow: the cloth gathers sideways and its free edge rides up and
+             down, which is what actually reads as wind from the front */
+          const shrink=amp*0.26*env*Math.cos(phase);
+          const rise  =amp*0.24*env*Math.sin(phase+0.9);
+          px += sdx*shrink + dnx*(rise - Math.abs(pz)*0.16);
+          py += sdy*shrink + dny*(rise - Math.abs(pz)*0.16);
+          /* the bottom corners furl */
+          const curl=CFG.card.curl*amp*Math.pow(vv,2.2)*(uu<0.5 ? (0.5-uu) : (uu-0.5))*2;
+          pz += curl*Math.sin(ph0*0.7+uu*3.1);
+        }
+        const o=(j*cl.nx+i)*3;
+        pos[o]=vx(px); pos[o+1]=vy(py); pos[o+2]=pz;
+      }
+    }
+    cl.geo.attributes.position.needsUpdate=true;
+    cl.geo.computeVertexNormals();
+
+    /* card weight pulls the line down where it hangs */
+    const wgt=CFG.card.weight;
+    addForceAt(aL, dnx*wgt*0.5, dny*wgt);
+    addForceAt(aR, dnx*wgt*0.5, dny*wgt);
+
+    /* loops on the rope + threads down to the cloth's own top corners */
+    const cornerL={ x:pos[0], y:pos[1], z:pos[2] };
+    const cornerR={ x:pos[cl.segX*3], y:pos[cl.segX*3+1], z:pos[cl.segX*3+2] };
+    setRing(c.ringL, aL); setRing(c.ringR, aR);
+    setThread(c.threadL, aL, cornerL);
+    setThread(c.threadR, aR, cornerR);
+  }
+}
+function setRing(m, a){
+  m.position.set(vx(a.x), vy(a.y), 0);
+  m.rotation.set(0, Math.PI/2, -a.ang);
+  m.scale.setScalar(Math.max(0.6, threadLen/22));
+}
+function setThread(g, a, corner){
+  const ax=vx(a.x), ay=vy(a.y);
+  const dx=corner.x-ax, dy=corner.y-ay;
+  const len=Math.hypot(dx,dy)||1;
+  g.position.set(ax, ay, corner.z*0.5);
+  g.rotation.z=Math.atan2(dy,dx);
+  g.scale.set(len/10, Math.max(0.5, threadLen/26), Math.max(0.5, threadLen/26));
+}
+
+/* =====================================================================
+   MAIN LOOP
+   ===================================================================== */
+let last=performance.now(), acc=0, ready=false;
+const FIXED=1/60;
+window.__jerry = { rope, cards, CFG, rig,
+  simStep: () => tick(FIXED),
+  renderInfo: () => ({ triangles: renderer.info.render.triangles, calls: renderer.info.render.calls, programs: renderer.info.programs.length }),
+  get state(){ return {ready,W,H,K,cardW,cardH,step,s0,lenRatio,scroll,target,scrollV,index,T,u,effort,effortS,gust,anchorL,anchorR}; } };
+
+function frame(now){
+  let dt=(now-last)/1000; last=now;
+  dt=Math.min(dt,1/20);
+  requestAnimationFrame(frame);
+  if(!ready || step<=0) return;
+  acc+=dt;
+  let steps=0;
+  while(acc>=FIXED && steps<4){ tick(FIXED); acc-=FIXED; steps++; }
+  drawRope();
+  renderer.render(scene, camera);
+}
+
+function tick(dt){
+  T+=dt;
+  nextGust-=dt;
+  if(nextGust<=0){ nextGust=1.6+Math.random()*3.2; gustTarget=0.22+Math.random()*0.62; }
+  gust=lerp(gust, gustTarget, 1-Math.pow(0.001,dt));
+
+  const prev=scroll;
+  if(!drag.active && !reduced){
+    const a=(target-scroll)*CFG.motion.springK - scrollV*CFG.motion.springDamp;
+    scrollV+=a*dt; scroll+=scrollV*dt;
+  } else if(!drag.active && reduced){
+    scroll=lerp(scroll, target, 1-Math.pow(0.0005,dt));
+    scrollV=(scroll-prev)/dt;
+  } else scrollV=(scroll-prev)/dt;
+  const dScroll=scroll-prev;
+
+  const idx=((Math.round(scroll/step)%DATA.length)+DATA.length)%DATA.length;
+  if(idx!==index){ index=idx; dots.forEach((d,i)=>d.setAttribute("aria-current", i===index?"true":"false")); }
+
+  const speedE=clamp(Math.abs(scrollV)/(step*1.6),0,1);
+  const holdE=drag.active ? clamp(Math.abs(drag.dx)/(step*0.55),0,1)*0.85 : 0;
+  effort=Math.max(speedE, holdE);
+  effortS=lerp(effortS, effort, 1-Math.pow(0.004,dt));
+
+  u += (dScroll/(step/CFG.motion.cyclesPerCard));
+  u = ((u%1)+1)%1;
+
+  blinkAt-=dt;
+  if(blinkAt<=0){ blinkAt=2.4+Math.random()*3.4; blink=1; }
+  blink=Math.max(0, blink-dt*7.5);
+  nextTwitch-=dt;
+  if(nextTwitch<=0){ nextTwitch=2.6+Math.random()*4; earTwitch=1; }
+  earTwitch=Math.max(0, earTwitch-dt*5.5);
+
+  poseJerry(dt);
+  placeCards(dt);
+  stepRope(dt, reduced ? 0 : gust, effortS);
+  stepParticles(dt);
+}
+
+/* =====================================================================
+   BOOT
+   ===================================================================== */
+function build(){
+  if(!layout()) return false;
+  anchorL={ ...anchorBase };
+  for(let i=0;i<90;i++){ poseJerry(FIXED); placeCards(FIXED); stepRope(FIXED, 0.2, 0); }
+  drawRope();
+  renderer.render(scene, camera);
+  ready=true;
+  return true;
+}
+function init(){
+  dots.forEach((d,i)=>d.setAttribute("aria-current", i===0?"true":"false"));
+  announce(0);
+  build();
+  requestAnimationFrame(frame);
+}
+/* the stage can measure 0x0 (hidden tab, zero-width preview pane, late fonts): the observer
+   both boots us late and keeps the geometry honest afterwards */
+let rzT;
+new ResizeObserver(() => {
+  clearTimeout(rzT);
+  rzT=setTimeout(() => {
+    if(!ready){ build(); return; }
+    const frac=step ? scroll/step : 0;
+    if(!layout()) return;
+    anchorL={ ...anchorBase };
+    scroll=frac*step; target=Math.round(frac)*step; scrollV=0;
+  }, 120);
+}).observe(stage);
+
+init();
+}
+})();
+</script>
+</body>
+</html>
