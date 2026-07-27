@@ -14,16 +14,20 @@
   Dragging (or arrows / dots) makes him pull: the active card travels off canvas and the one
   peeking at the right takes its place.
 
-  Everything in the stage is WebGL — rope (swept tube), cards (cloth), character. Card text
+  Everything in the stage is WebGL — rope (three helically wound strands over a core, real
+  braid geometry), cards (cloth), character. Card text
   is painted to a canvas texture; the same text is in the DOM, visually hidden, for screen
   readers.
 
   Needs vendor/three.bundle.js beside this file: three.js repacked as a classic script,
   because ES-module imports do not work over file://.
 
-  The character is an original stylized mouse built from primitives in buildMouse(), NOT the
-  Warner Bros. character. To use your own model, load a GLB there and map its joints onto the
-  same names in `rig`; poseJerry() drives everything through those.
+  The puller is a rigged humanoid GLB (skeleton only — its animations were stripped). It is
+  posed entirely by poseHuman(): hips drop and travel back under load, the lean is spread
+  over three spine joints, arms are solved with CCD IK onto two grip points that slide along
+  the rope hand over hand, and the legs are solved onto planted feet so the knees absorb the
+  weight shift. Swap in your own character by replacing assets/puller.glb.js — any standard
+  humanoid rig works, the bone lookup strips a `mixamorig` prefix.
 
   Sample testimonial copy below is placeholder — replace DATA.
 -->
@@ -103,7 +107,7 @@ body{
       <p class="eyebrow">Word on the line</p>
       <h2>They said it <em>out loud</em>, we hung it out to dry.</h2>
     </div>
-    <p>Jerry does the heavy lifting. Drag the line — or nudge him with the arrows — to haul in the next one.</p>
+    <p>She does the heavy lifting. Drag the line — or nudge her with the arrows — to haul in the next one.</p>
   </div>
 
   <div class="stage" id="stage" tabindex="0" aria-label="Testimonial clothesline. Drag horizontally or use arrow keys.">
@@ -128,6 +132,8 @@ body{
 </section>
 
 <script src="vendor/three.bundle.js"></script>
+<script src="vendor/GLTFLoader.bundle.js"></script>
+<script src="assets/puller.glb.js"></script>
 <script>
 (() => {
 "use strict";
@@ -150,7 +156,11 @@ const CFG = {
     windX:900,
     windY:460,
     tugAmp:30,
-    radius:2.9,
+    radius:3.6,          // core radius; strands wind around this
+    strands:3,
+    strandR:2.05,        // each strand's own tube radius
+    lay:26,              // px per full twist (real rope lays at ~6-8x diameter)
+    sampleEvery:4,       // centreline sampling for the helix, px
   },
   card:{
     weight:1250,
@@ -178,11 +188,11 @@ const CFG = {
 const DATA = [
   { quote:"The rope physics is the whole pitch. People drag it three or four times before they even read the words — and then they read all of them.",
     name:"Marisol Vega", role:"Head of Growth, Northwind Studio", tint:"#C2603C", stars:5 },
-  { quote:"We shipped it on a Thursday. By Monday support had four emails asking who animated the mouse. Nobody asked about the pricing table.",
+  { quote:"We shipped it on a Thursday. By Monday support had four emails asking who animated the rope. Nobody asked about the pricing table.",
     name:"Dev Raman", role:"Founder, Halftone", tint:"#7C8C6A", stars:5 },
   { quote:"I have reviewed a lot of testimonial sections. This is the first one my team argued about — in a good way — for an entire standup.",
     name:"Aoife Brennan", role:"Design Lead, Kestrel", tint:"#3F6B8A", stars:5 },
-  { quote:"Sixty frames a second of tiny rodent labour. It somehow made the quotes feel earned instead of pasted in from a spreadsheet.",
+  { quote:"Sixty frames a second of someone visibly straining on your behalf. It made the quotes feel earned instead of pasted in from a spreadsheet.",
     name:"Tomas Lindqvist", role:"Creative Director, Fold", tint:"#A8623F", stars:4 },
   { quote:"Dwell time on the section went from four seconds to twenty-six. The wind on the cards is doing something to people's brains.",
     name:"Priya Nadar", role:"Product Marketing, Slate & Co.", tint:"#6B5C8A", stars:5 },
@@ -237,7 +247,11 @@ scene.add(hemi, key, fill, rim);
 /* a wall a little behind everything, so cards and character throw real shadows */
 const wall = new THREE.Mesh(new THREE.PlaneGeometry(1,1), new THREE.ShadowMaterial({ opacity:0.11 }));
 wall.receiveShadow = true;
-scene.add(wall);
+/* a floor catcher too, so his feet get a contact shadow and he reads as standing */
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(1,1), new THREE.ShadowMaterial({ opacity:0.17 }));
+floor.rotation.x = -Math.PI/2;
+floor.receiveShadow = true;
+scene.add(wall, floor);
 
 /* ---------- materials ---------- */
 const MAT = {
@@ -334,20 +348,19 @@ function updateTube(tube, pts, radius, taper){
   tube.geo.attributes.normal.needsUpdate = true;
 }
 
-/* ---------- rope look: procedural twist texture ---------- */
-function ropeTexture(){
-  const c=document.createElement("canvas"); c.width=64; c.height=64;
+/* ---------- rope: three strands helically wound around a core ----------
+   The braid is real geometry (each strand is its own swept tube), so the lay of the rope
+   reads at any zoom; the texture only supplies micro-fibre. */
+function fibreTexture(){
+  const c=document.createElement("canvas"); c.width=128; c.height=128;
   const x=c.getContext("2d");
-  x.fillStyle="#C08A55"; x.fillRect(0,0,64,64);
-  for(let i=-64;i<128;i+=16){
-    const g=x.createLinearGradient(i,0,i+16,64);
-    g.addColorStop(0,   "rgba(255,229,186,.75)");
-    g.addColorStop(0.45,"rgba(196,140,86,.15)");
-    g.addColorStop(0.5, "rgba(120,80,44,.55)");
-    g.addColorStop(0.62,"rgba(196,140,86,.15)");
-    g.addColorStop(1,   "rgba(255,229,186,.55)");
-    x.fillStyle=g;
-    x.beginPath(); x.moveTo(i,0); x.lineTo(i+16,0); x.lineTo(i+32,64); x.lineTo(i+16,64); x.closePath(); x.fill();
+  x.fillStyle="#C79A63"; x.fillRect(0,0,128,128);
+  for(let i=0;i<1400;i++){                       // fibres running along the strand
+    const y=Math.random()*128, len=6+Math.random()*26, xx=Math.random()*128;
+    const t=Math.random();
+    x.strokeStyle = t<0.5 ? `rgba(${120+t*60|0},${86+t*40|0},48,.35)` : `rgba(255,${226+t*20|0},178,.32)`;
+    x.lineWidth = 0.6+Math.random()*1.2;
+    x.beginPath(); x.moveTo(xx,y); x.lineTo(xx+len*0.25, y+len); x.stroke();
   }
   const t=new THREE.CanvasTexture(c);
   t.wrapS=t.wrapT=THREE.RepeatWrapping;
@@ -355,12 +368,46 @@ function ropeTexture(){
   t.anisotropy=renderer.capabilities.getMaxAnisotropy();
   return t;
 }
-const ropeTex = ropeTexture();
-MAT.rope = new THREE.MeshStandardMaterial({ map:ropeTex, roughness:0.82, bumpMap:ropeTex, bumpScale:1.1 });
+const fibreTex = fibreTexture();
+MAT.rope = new THREE.MeshStandardMaterial({ map:fibreTex, roughness:0.95, bumpMap:fibreTex, bumpScale:0.8 });
+MAT.ropeCore = new THREE.MeshStandardMaterial({ color:0x6E4A28, roughness:1 });
 
-const line    = makeTube(CFG.rope.points, 10, MAT.rope);
-const freeEnd = makeTube(26, 8, MAT.rope);
-scene.add(line.mesh, freeEnd.mesh);
+/* one rope = N strand tubes + a dark core so the gaps between strands do not see through */
+function makeRope(nSeg){
+  const strands=[];
+  for(let k=0;k<CFG.rope.strands;k++) strands.push(makeTube(nSeg, 7, MAT.rope));
+  const core = makeTube(nSeg, 8, MAT.ropeCore);
+  for(const t of strands) scene.add(t.mesh);
+  scene.add(core.mesh);
+  return { strands, core, nSeg, buf:Array.from({length:nSeg},()=>({x:0,y:0,z:0})) };
+}
+const _fN=new THREE.Vector3(), _fB=new THREE.Vector3(), _fT=new THREE.Vector3(), _fUp=new THREE.Vector3(0,0,1);
+/* pts: centreline in scene space; arc: matching arc length per sample (for a constant lay) */
+function updateRope(rp, pts, arc, radius, strandR){
+  const n=rp.nSeg, twist=Math.PI*2/CFG.rope.lay;
+  for(let k=0;k<rp.strands.length;k++){
+    const phase = k/rp.strands.length*Math.PI*2;
+    const buf = rp.buf;
+    for(let i=0;i<n;i++){
+      const p=pts[i], pPrev=pts[Math.max(0,i-1)], pNext=pts[Math.min(n-1,i+1)];
+      _fT.set(pNext.x-pPrev.x, pNext.y-pPrev.y, (pNext.z||0)-(pPrev.z||0));
+      if(_fT.lengthSq()<1e-9) _fT.set(1,0,0);
+      _fT.normalize();
+      _fN.crossVectors(_fT,_fUp); if(_fN.lengthSq()<1e-9) _fN.set(0,1,0); _fN.normalize();
+      _fB.crossVectors(_fT,_fN).normalize();
+      const a = phase + arc[i]*twist, c=Math.cos(a), sn=Math.sin(a);
+      buf[i].x = p.x + (_fN.x*c + _fB.x*sn)*radius;
+      buf[i].y = p.y + (_fN.y*c + _fB.y*sn)*radius;
+      buf[i].z = (p.z||0) + (_fN.z*c + _fB.z*sn)*radius;
+    }
+    updateTube(rp.strands[k], buf, strandR);
+  }
+  updateTube(rp.core, pts, radius*0.82);
+}
+
+const LINE_SAMPLES = 360, FREE_SAMPLES = 150;
+const line    = makeRope(LINE_SAMPLES);
+const freeEnd = makeRope(FREE_SAMPLES);
 
 /* =====================================================================
    CARD CLOTH
@@ -413,6 +460,7 @@ function paintCard(d, w, h, dpr){
     ay = h-pad-avR*0.2;
     x.strokeStyle="rgba(186,164,130,.55)"; x.lineWidth=1;
     x.beginPath(); x.moveTo(pad, ay-avR*1.9); x.lineTo(w-pad, ay-avR*1.9); x.stroke();
+    if(x.measureText(d.role).width > w-pad*2-avR*3) x.font=`${Math.round(mSize*0.8)}px -apple-system, system-ui, sans-serif`;
     ax = pad+avR;
   } else {
     const cx0 = pad+colW+Math.round(w*0.05);
@@ -438,7 +486,7 @@ function paintCard(d, w, h, dpr){
   x.fillStyle="#C2603C";
   x.font=`${Math.round(mSize*0.95)}px -apple-system, system-ui, sans-serif`;
   const stars="★".repeat(d.stars)+"☆".repeat(5-d.stars);
-  if(stacked) x.fillText(stars, w-pad-x.measureText(stars).width, ay+mSize*0.2);
+  if(stacked) x.fillText(stars, w-pad-x.measureText(stars).width, ay-mSize*0.25);   // beside the name, clear of the role
   else        x.fillText(stars, tx, ay+mSize*2.2);
 
   const t=new THREE.CanvasTexture(c);
@@ -502,124 +550,119 @@ const dots = DATA.map((d,i) => {
 });
 
 /* =====================================================================
-   CHARACTER
-   ===================================================================== */
-const RIG = {
-  hipF:{x:6,y:-2},  hipB:{x:-14,y:-6},
-  shF:{x:26,y:-64}, shB:{x:4,y:-70},
-  headRel:{x:14,y:-116},
-  tailRel:{x:-30,y:-16},
-  foreheadRel:{x:40,y:-150},
-  armUp:34, armFore:30, handR:9.5,
-  legUp:40, legLo:34,
-  headR:33,
+   THE PULLER — rigged human, posed procedurally
+   =====================================================================
+   The GLB ships a skeleton only (its animations were stripped). Everything below is
+   authored: the body leans and crouches into the haul, the arms are solved with IK onto
+   two grip points that slide along the rope hand over hand, and the legs are solved onto
+   planted feet so the knees take the weight shift for free. */
+const HUMAN = {
+  ready:false, root:null, mesh:null, B:{}, rest:{},
+  scale:1, ground:0, faceY:1.24, armLen:0, shoulder:{x:0,y:0},
+  /* fractions of the rest hip height — the rig's bone units are not metres */
+  hipDrop:0.16, hipBack:0.26,
 };
-const rig = {};
-function buildMouse(){
-  const root = new THREE.Group();
+const IK = {
+  v0:new THREE.Vector3(), v1:new THREE.Vector3(), v2:new THREE.Vector3(), v3:new THREE.Vector3(),
+  q0:new THREE.Quaternion(), q1:new THREE.Quaternion(), q2:new THREE.Quaternion(),
+};
+function bonePos(b, out){ b.updateWorldMatrix(true,false); return out.setFromMatrixPosition(b.matrixWorld); }
 
-  /* torso: one lathed surface, so there is no seam between chest and haunch */
-  const profile = [[0.1,-98],[9,-94],[15,-88],[21,-78],[27,-64],[32,-48],[35,-30],[36,-10],[34,8],[29,22],[21,34],[10,43],[0.1,47]]
-    .map(([r,y]) => new THREE.Vector2(r, -y));
-  const torso = new THREE.Group();
-  const torsoMesh = new THREE.Mesh(new THREE.LatheGeometry(profile, 28), MAT.fur);
-  torsoMesh.scale.set(1,1,0.94);
-  torsoMesh.castShadow = true;
-  torso.add(torsoMesh);
-  torso.add(ball(MAT.belly, 24, 30, 20, 11, -34, 18));      // chest/belly patch
-  root.add(torso);
-
-  /* head: skull + lathed snout, so the muzzle is continuous with the face */
-  const head = new THREE.Group();
-  head.add(ball(MAT.fur, RIG.headR, RIG.headR*0.97, RIG.headR*0.93, 0,0,0));
-  const snoutProfile = [[0.4,0],[7,4],[11,10],[13.5,18],[13,27],[9,33],[3,36]].map(([r,l]) => new THREE.Vector2(r,l));
-  const snout = new THREE.Mesh(new THREE.LatheGeometry(snoutProfile, 20), MAT.belly);
-  snout.rotation.z = Math.PI/2;
-  snout.rotation.x = 0.1;
-  snout.position.set(20, -4, 6);
-  snout.scale.set(1.5, 1, 1.05);
-  snout.castShadow = true;
-  head.add(snout);
-  head.add(ball(MAT.nose, 5.6, 4.9, 5.2, 45, 2, 8));
-  head.add(ball(MAT.fur, 15, 13, 14, 6, -6, 0));
-
-  const mkEar = (rOut, rIn, tilt, sign) => {
-    const g=new THREE.Group();
-    g.add(ball(MAT.fur, rOut, rOut*1.04, rOut*0.34, 0,0,0));
-    g.add(ball(MAT.ear, rIn, rIn*1.04, rIn*0.3, 0,0, rOut*0.22*sign));
-    g.rotation.y = tilt;
-    return g;
-  };
-  const earL = mkEar(23, 15.5,  0.55,  1);
-  const earR = mkEar(20, 13.5, -0.75, -1);
-  at(earL, 2, -30, 15); at(earR, -12, -32, -13);
-  head.add(earL, earR);
-
-  function eyeAt(dx,dy,dz,r){
-    const g=new THREE.Group();
-    g.add(ball(MAT.eye,   r, r*1.1, r, 0,0,0));
-    g.add(ball(MAT.pupil, r*0.5, r*0.54, r*0.5, 0,0,0));
-    g.add(ball(MAT.eye,   r*0.19, r*0.19, r*0.19, 0,0,0));
-    const v=new THREE.Vector3(dx,-dy,dz).normalize();
-    g.position.copy(v.clone().multiplyScalar(24.5));
-    g.children[1].position.set(0, -r*0.06, r*0.8);
-    g.children[2].position.set(-r*0.22, r*0.3, r*1.0);
-    g.lookAt(g.position.clone().add(v));
-    return g;
+/* rotate a bone so its world rotation becomes q * current, expressed in parent space */
+function applyWorldDelta(bone, q){
+  const wq = bone.getWorldQuaternion(IK.q1);
+  const pq = bone.parent.getWorldQuaternion(IK.q2).invert();
+  bone.quaternion.copy(pq.multiply(q.clone().multiply(wq)));
+  bone.updateMatrixWorld(true);
+}
+/* cyclic-coordinate-descent onto a world target */
+function ccdIK(chain, tip, targetW, iters){
+  for(let it=0; it<iters; it++){
+    for(let i=chain.length-1; i>=0; i--){
+      const b = chain[i];
+      const bp = bonePos(b, IK.v0);
+      const tp = bonePos(tip, IK.v1);
+      const a = IK.v2.copy(tp).sub(bp);
+      const c = IK.v3.copy(targetW).sub(bp);
+      if(a.lengthSq()<1e-8 || c.lengthSq()<1e-8) continue;
+      applyWorldDelta(b, IK.q0.setFromUnitVectors(a.normalize(), c.normalize()));
+    }
   }
-  const eyeL = eyeAt(0.62,-0.24, 0.72, 9.5);
-  const eyeR = eyeAt(0.50,-0.28,-0.74, 8.2);
-  head.add(eyeL, eyeR);
+}
+/* swing the middle joint around the root->target axis so elbows/knees point somewhere
+   anatomically sane instead of wherever CCD left them */
+function pole(rootB, midB, targetW, poleW){
+  const s = bonePos(rootB, IK.v0).clone();
+  const axis = IK.v1.copy(targetW).sub(s);
+  if(axis.lengthSq()<1e-8) return;
+  axis.normalize();
+  const e = bonePos(midB, IK.v2).clone().sub(s);
+  const eP = e.sub(axis.clone().multiplyScalar(e.dot(axis)));
+  const pW = poleW.clone().sub(s);
+  const pP = pW.sub(axis.clone().multiplyScalar(pW.dot(axis)));
+  if(eP.lengthSq()<1e-8 || pP.lengthSq()<1e-8) return;
+  eP.normalize(); pP.normalize();
+  let ang = Math.acos(clamp(eP.dot(pP), -1, 1));
+  if(eP.clone().cross(pP).dot(axis) < 0) ang = -ang;
+  applyWorldDelta(rootB, IK.q0.setFromAxisAngle(axis, ang));
+}
 
-  const browL = ball(MAT.dark, 8.5, 2.3, 3, 20, -19, 20);
-  const browR = ball(MAT.dark, 7.5, 2.1, 3, 4, -22, -18);
-  const mouth = ball(MAT.mouth, 5.5, 3.6, 4.5, 33, 13, 10);
-  head.add(browL, browR, mouth);
-  for(const [a,zz] of [[-0.3,13],[0.0,15],[0.3,11]]){
-    const w=new THREE.Mesh(new THREE.CylinderGeometry(0.35,0.7,34,5), MAT.dark);
-    w.rotation.z = -Math.PI/2 + a; w.rotation.y = -0.5;
-    at(w, 44, 4, zz);
-    head.add(w);
-  }
-  root.add(head);
-
-  const armF = { upper: segment(MAT.fur,   RIG.armUp,  9.5, 7.6), lower: segment(MAT.fur,   RIG.armFore, 7.6, 6.2) };
-  const armB = { upper: segment(MAT.furDk, RIG.armUp,  9.0, 7.2), lower: segment(MAT.furDk, RIG.armFore, 7.2, 5.8) };
-  const legF = { upper: segment(MAT.fur,   RIG.legUp, 13.5,10.5), lower: segment(MAT.fur,   RIG.legLo,  10.5, 8.0) };
-  const legB = { upper: segment(MAT.furDk, RIG.legUp, 12.5, 9.8), lower: segment(MAT.furDk, RIG.legLo,   9.8, 7.4) };
-  const handF = new THREE.Group(); handF.add(ball(MAT.hand, RIG.handR, RIG.handR, RIG.handR*0.9, 0,0,0));
-  const handB = new THREE.Group(); handB.add(ball(MAT.hand, RIG.handR*0.92, RIG.handR*0.92, RIG.handR*0.8, 0,0,0));
-  const footF = new THREE.Group(); footF.add(ball(MAT.furDk, 16, 8, 11, 5,0,0));
-  const footB = new THREE.Group(); footB.add(ball(MAT.furDk, 15, 7.5, 10, 5,0,0));
-  root.add(armF.upper, armF.lower, armB.upper, armB.lower, handF, handB,
-           legF.upper, legF.lower, legB.upper, legB.lower, footF, footB);
-
-  const tail = makeTube(18, 8, MAT.furDk);
-  scene.add(tail.mesh);
-
-  Object.assign(rig, { root, torso, head, earL, earR, eyeL, eyeR, browL, browR, mouth,
-                       armF, armB, handF, handB, legF, legB, footF, footB, tail });
+function initHuman(gltf){
+  const root = gltf.scene;
+  root.traverse(o => {
+    if(o.isMesh || o.isSkinnedMesh){
+      o.castShadow = true;
+      o.frustumCulled = false;
+      if(o.isSkinnedMesh) HUMAN.mesh = o;
+      const m = o.material;
+      if(m){ m.roughness = 0.88; m.metalness = 0.0; m.envMapIntensity = 0.6; }
+    }
+    if(o.isBone) HUMAN.B[o.name.replace(/^mixamorig/,"")] = o;
+  });
+  for(const k in HUMAN.B) HUMAN.rest[k] = HUMAN.B[k].quaternion.clone();
+  HUMAN.restHip = HUMAN.B.Hips.position.clone();
+  HUMAN.root = root;
   scene.add(root);
+  gripFists();
+  HUMAN.ready = true;
+  if(ready){ const frac = step ? scroll/step : 0; layout(); scroll = frac*step; target = Math.round(frac)*step; }
 }
-buildMouse();
+/* close both hands once — the fingers are never re-posed after this */
+function gripFists(){
+  for(const side of ["Left","Right"]){
+    for(const f of ["Thumb","Index","Middle","Ring","Pinky"]){
+      for(let j=1;j<=3;j++){
+        const b = HUMAN.B[`${side}Hand${f}${j}`];
+        if(!b) continue;
+        const bend = f==="Thumb" ? 0.55 : (j===1 ? 1.05 : 1.25);
+        b.quaternion.copy(HUMAN.rest[`${side}Hand${f}${j}`])
+                    .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), (side==="Left"?-1:1)*bend));
+      }
+    }
+  }
+}
+/* scale and stand him on the ground line, facing the rope */
+function placeHuman(){
+  if(!HUMAN.ready) return;
+  const r = HUMAN.root;
+  r.scale.setScalar(HUMAN.scale);
+  r.rotation.set(0, HUMAN.faceY, 0);
+  r.position.set(vx(humanX), vy(humanGroundY), 40);
+  r.updateMatrixWorld(true);
+  /* measure the arm off the rig rather than guessing: everything about where the rope can
+     be gripped, and how far a stroke travels, follows from it */
+  const sh = bonePos(HUMAN.B.LeftArm, new THREE.Vector3());
+  const hd = bonePos(HUMAN.B.LeftHand, new THREE.Vector3());
+  HUMAN.armLen  = sh.distanceTo(hd);
+  HUMAN.shoulder = { x: sh.x + W/2, y: H/2 - sh.y };
+  HUMAN.reach = HUMAN.armLen;
+}
 
-/* parts are positioned in stage px but modelled in design px, so each carries the K scale */
-function scaleRig(){
-  const parts=[rig.head, rig.handF, rig.handB, rig.footF, rig.footB,
-               rig.armF.upper, rig.armF.lower, rig.armB.upper, rig.armB.lower,
-               rig.legF.upper, rig.legF.lower, rig.legB.upper, rig.legB.lower];
-  for(const p of parts) p.scale.setScalar(K);
-  rig.torso.scale.setScalar(K);
-}
+let humanX=0, humanGroundY=0;
 
-const strain = [];
-for(let i=0;i<3;i++){
-  const mat=new THREE.MeshBasicMaterial({ color:0xC2603C, transparent:true, opacity:0 });
-  const m=new THREE.Mesh(new THREE.CylinderGeometry(1.5,1.5,12,6), mat);
-  scene.add(m); strain.push({ m, mat });
-}
+/* sweat, kept from the earlier build — it sells the effort */
 const sweat = [];
-for(let i=0;i<20;i++){
+for(let i=0;i<18;i++){
   const mat=MAT.drop.clone();
   const m=new THREE.Mesh(GEO.ball, mat);
   m.visible=false; scene.add(m);
@@ -640,25 +683,30 @@ function layout(){
   W=w; H=h;
   const narrow = W<760;
 
-  cardW = W * (narrow ? 0.68 : 0.72);
-  cardH = H * (narrow ? 0.48 : 0.50);
+  cardW = W * (narrow ? 0.64 : 0.72);
+  cardH = H * (narrow ? 0.40 : 0.42);
   const gap = W * (narrow ? 0.028 : 0.032);
   step = cardW + gap;
   span = cardW - CFG.card.ringInset*2;
   threadLen = H * 0.05;
 
-  const lineY = H * (narrow ? 0.185 : 0.17);
-  gripPoint  = { x: W * (narrow ? 0.25 : 0.135), y: lineY };
+  /* The line sits at the chest height of a standing person, so the haul reads as a real
+     tug-of-war stance rather than someone reaching overhead. */
+  const lineY = H * (narrow ? 0.36 : 0.40);
+  humanGroundY = H * 0.965;
+  humanX       = W * (narrow ? -0.09 : 0.085);   // phones only have room for her arms
+  HUMAN.scale  = (humanGroundY - lineY) / (1.66 * 0.74);   // rope meets her at chest height
+  placeHuman();
+
+  /* the rope starts at his fists: grip point comes off the measured shoulder and arm */
+  const armLen = HUMAN.ready ? HUMAN.armLen : (humanGroundY-lineY)*0.34;
+  const shX    = HUMAN.ready ? HUMAN.shoulder.x : humanX;
+  gripPoint  = { x: shX + armLen*0.62, y: lineY };
   anchorBase = { ...gripPoint };
   anchorR    = { x: W + cardW + 260, y: lineY - H*0.03 };
   anchorL    = { ...anchorBase };
-
-  /* he is placed *from* the line: hips wherever his shoulders can reach the rope with a
-     natural bent arm, which also lands his head just above it */
-  K = H * (narrow ? 0.0019 : 0.0024);
-  const reach = (RIG.armUp + RIG.armFore) * K;
-  hips = { x: gripPoint.x - 0.78*reach - RIG.shF.x*K, y: lineY + (-RIG.shF.y)*K + 0.46*reach };
-  scaleRig();
+  HUMAN.stanceFront = armLen * 0.80;
+  HUMAN.stanceBack  = armLen * 0.62;
 
   const camDist = (H/2) / Math.tan((camera.fov*Math.PI/180)/2);
   camera.aspect = W/H;
@@ -675,6 +723,8 @@ function layout(){
   rim.position.set(0.25*W, -0.55*H, -380);
   wall.position.set(0,0,-150);
   wall.scale.set(W*2.4, H*2.4, 1);
+  floor.position.set(0, vy(humanGroundY), 120);
+  floor.scale.set(W*2.4, 600, 1);
 
   const N=CFG.rope.points;
   rope.pts.length=0;
@@ -688,7 +738,7 @@ function layout(){
   rope.seg=(straight/(N-1))*CFG.rope.slack;
   ropeRestLen=rope.seg*(N-1);
   lenRatio=ropeRestLen/(anchorR.x-anchorBase.x);
-  const activeCX = W*(narrow?0.14:0.075) + cardW/2;
+  const activeCX = W*(narrow?0.19:0.075) + cardW/2;
   s0 = (activeCX-anchorBase.x)*lenRatio;
 
   const dpr = Math.min(devicePixelRatio||1, 2) * 1.35;
@@ -769,35 +819,43 @@ function stepRope(dt, gustNow, tension){
   buildCum();
 }
 
-const _linePts=[], _freePts=[], _tailPts=[];
-for(let i=0;i<CFG.rope.points;i++) _linePts.push({x:0,y:0,z:0});
-for(let i=0;i<26;i++) _freePts.push({x:0,y:0,z:0});
-for(let i=0;i<18;i++) _tailPts.push({x:0,y:0,z:0});
+const _linePts=[], _lineArc=[], _freePts=[], _freeArc=[];
+for(let i=0;i<LINE_SAMPLES;i++){ _linePts.push({x:0,y:0,z:0}); _lineArc.push(0); }
+for(let i=0;i<FREE_SAMPLES;i++){ _freePts.push({x:0,y:0,z:0}); _freeArc.push(0); }
 
 function drawRope(){
-  for(let i=0;i<rope.pts.length;i++){
-    const p=rope.pts[i], o=_linePts[i];
-    o.x=vx(p.x); o.y=vy(p.y); o.z=0;
+  /* Sample the simulated line by arc length: the helix needs far denser samples than the
+     56 sim points, and a constant arc step keeps the lay of the rope even. */
+  const visible = Math.min(rope.cum[rope.cum.length-1], W + cardW*0.6 + 300);
+  const stepS = visible/(LINE_SAMPLES-1);
+  for(let i=0;i<LINE_SAMPLES;i++){
+    const sArc = i*stepS, a = atLength(sArc);
+    _linePts[i].x = vx(a.x); _linePts[i].y = vy(a.y); _linePts[i].z = 0;
+    _lineArc[i] = sArc;
   }
-  updateTube(line, _linePts, CFG.rope.radius);
+  updateRope(line, _linePts, _lineArc, CFG.rope.radius, CFG.rope.strandR);
 
-  /* the free end: from his gripping fist it drops behind him and leaves the lower-left */
+  /* the free end: from the gripping fist it drops away and leaves the lower-left */
   const a=anchorL, f=fistW;
   const sway=Math.sin(T*1.15)*7 + tugPulse*10;
-  const drop=H*0.32 + sway;
-  const c1={x:f.x-26-tugPulse*14, y:f.y+drop*0.55}, c2={x:W*0.05, y:f.y+drop*1.25}, p3={x:-W*0.05, y:H*0.92};
-  for(let i=0;i<_freePts.length;i++){
-    const t=i/(_freePts.length-1);
+  const drop=H*0.30 + sway;
+  const c1={x:f.x-30-tugPulse*16, y:f.y+drop*0.5}, c2={x:f.x-10, y:f.y+drop*1.1}, p3={x:-W*0.06, y:H*1.02};
+  let run=0, px=0, py=0;
+  for(let i=0;i<FREE_SAMPLES;i++){
+    const t=i/(FREE_SAMPLES-1);
     let x,y;
-    if(t<0.18){ const k=t/0.18; x=lerp(a.x,f.x,k); y=lerp(a.y,f.y,k); }
+    if(t<0.16){ const k=t/0.16; x=lerp(a.x,f.x,k); y=lerp(a.y,f.y,k); }
     else {
-      const k=(t-0.18)/0.82, m=1-k;
+      const k=(t-0.16)/0.84, m=1-k;
       x = m*m*m*f.x + 3*m*m*k*c1.x + 3*m*k*k*c2.x + k*k*k*p3.x;
       y = m*m*m*f.y + 3*m*m*k*c1.y + 3*m*k*k*c2.y + k*k*k*p3.y;
     }
-    _freePts[i].x=vx(x); _freePts[i].y=vy(y); _freePts[i].z=-30+40*Math.sin(t*2.2);
+    if(i>0) run += Math.hypot(x-px, y-py);
+    px=x; py=y;
+    _freePts[i].x=vx(x); _freePts[i].y=vy(y); _freePts[i].z=-20+30*Math.sin(t*2.4);
+    _freeArc[i]=run;
   }
-  updateTube(freeEnd, _freePts, CFG.rope.radius*0.94);
+  updateRope(freeEnd, _freePts, _freeArc, CFG.rope.radius*0.96, CFG.rope.strandR*0.96);
 }
 
 /* =====================================================================
@@ -855,148 +913,149 @@ stage.addEventListener("pointerup", endDrag);
 stage.addEventListener("pointercancel", endDrag);
 
 /* =====================================================================
-   POSE  (screen px, y down; a screen angle a becomes rotation.z of -a)
-   ===================================================================== */
-function ik(sx,sy,tx,ty,l1,l2,bend){
-  let dx=tx-sx, dy=ty-sy, d=Math.hypot(dx,dy);
-  d=clamp(d, Math.abs(l1-l2)+0.01, l1+l2-0.01);
-  const a=Math.atan2(dy,dx);
-  const A=Math.acos(clamp((d*d+l1*l1-l2*l2)/(2*d*l1),-1,1));
-  const up=a-A*bend;
-  const ex=sx+Math.cos(up)*l1, ey=sy+Math.sin(up)*l1;
-  return { up, fore:Math.atan2(ty-ey,tx-ex), ex, ey };
-}
-function place(chain, endGroup, S, targetPt, l1, l2, bend, z){
-  const {up,fore,ex,ey}=ik(S.x,S.y,targetPt.x,targetPt.y,l1*K,l2*K,bend);
-  chain.upper.position.set(vx(S.x), vy(S.y), z);
-  chain.upper.rotation.z = -up;
-  chain.lower.position.set(vx(ex), vy(ey), z);
-  chain.lower.rotation.z = -fore;
-  const hx=ex+Math.cos(fore)*l2*K, hy=ey+Math.sin(fore)*l2*K;
-  if(endGroup){
-    endGroup.position.set(vx(hx), vy(hy), z);
-    endGroup.rotation.z=-fore;
-    endGroup.scale.setScalar(K);
-  }
-  return {x:hx, y:hy};
-}
+   POSE — how a person actually hauls a rope
+   =====================================================================
+   One stroke: reach out along the rope, close the grip, drive with the legs while the
+   torso rotates back over the hips, then release and reach again. The two hands are half
+   a cycle apart, so one is always loaded. Effort deepens the crouch, the lean and the
+   speed of it all. */
 function handStroke(phase){
-  const p=((phase%1)+1)%1, pullEnd=0.58;
-  if(p<pullEnd){
+  const p=((phase%1)+1)%1, pullEnd=0.56;
+  /* t is a fraction of arm length along the rope, kept inside what the arm can actually
+     reach from the shoulder (grip sits at 0.62 of arm length ahead of it) */
+  if(p<pullEnd){                                   // loaded: hauls from far to near
     const k=easeIO(p/pullEnd);
-    return { t:lerp(34,-26,k), lift:0, grip:1, drive:Math.sin(Math.PI*(p/pullEnd)) };
+    return { t:lerp(0.34,-0.22,k), lift:0, grip:1, drive:Math.sin(Math.PI*(p/pullEnd)) };
   }
-  const k=easeIO((p-pullEnd)/(1-pullEnd));
-  return { t:lerp(-26,34,k), lift:Math.sin(Math.PI*k)*13, grip:0, drive:0 };
+  const k=easeIO((p-pullEnd)/(1-pullEnd));         // recovery: off the rope, reaching back out
+  return { t:lerp(-0.22,0.34,k), lift:Math.sin(Math.PI*k)*0.16, grip:0, drive:0 };
 }
 
-function poseJerry(dt){
-  const E=effortS, grip=gripPoint;
+const _gT=new THREE.Vector3(), _pole=new THREE.Vector3(), _axis=new THREE.Vector3(0,0,1);
+function poseHuman(dt){
+  const E=effortS, B=HUMAN.B, R=HUMAN.rest;
+  const grip=gripPoint;
+
+  /* direction of the rope, away from him */
   let hx=anchorR.x-grip.x, hy=anchorR.y-grip.y;
-  const hlen=Math.hypot(hx,hy)||1, rdx=hx/hlen, rdy=hy/hlen, pdx=-rdy, pdy=rdx;
+  const hlen=Math.hypot(hx,hy)||1, rdx=hx/hlen, rdy=hy/hlen;
 
-  const A=handStroke(u), B=handStroke(u+0.5);
-  const handF={ x:grip.x+rdx*A.t*K+pdx*(-A.lift*K), y:grip.y+rdy*A.t*K+pdy*(-A.lift*K) };
-  const handB={ x:grip.x+rdx*B.t*K+pdx*(3-B.lift)*K, y:grip.y+rdy*B.t*K+pdy*(3-B.lift)*K+3*K };
+  const A=handStroke(u), Bs=handStroke(u+0.5);
+  const stroke=Math.max(A.drive,Bs.drive);
+  const reach = HUMAN.reach;                       // px his arms can span
 
-  const stroke=Math.max(A.drive,B.drive);
-  const lean=(0.16+0.24*E)*(0.5+0.5*stroke);
-  const breathe=Math.sin(T*2.1)*0.02*(1-E*0.6);
-  const sink=(2+12*E)*(0.4+0.6*stroke)*K;
-  const hip={ x:hips.x-Math.sin(lean)*6*K, y:hips.y+sink };
+  /* the two grip points, sliding along the rope */
+  const gA={ x:grip.x+rdx*A.t*reach,  y:grip.y+rdy*A.t*reach  - A.lift*reach };
+  const gB={ x:grip.x+rdx*Bs.t*reach, y:grip.y+rdy*Bs.t*reach - Bs.lift*reach };
 
-  rig.torso.position.set(vx(hip.x), vy(hip.y), 0);
-  rig.torso.rotation.z=lean;
-  rig.torso.rotation.y=-0.26+Math.sin(T*0.7)*0.03;
-  rig.torso.scale.set(K, K*(1+breathe), K);
+  /* --- reset everything we drive, so each frame starts from the rest pose --- */
+  for(const k of ["Hips","Spine","Spine1","Spine2","Neck","Head",
+                  "LeftShoulder","LeftArm","LeftForeArm","LeftHand",
+                  "RightShoulder","RightArm","RightForeArm","RightHand",
+                  "LeftUpLeg","LeftLeg","LeftFoot","RightUpLeg","RightLeg","RightFoot"]){
+    if(B[k]) B[k].quaternion.copy(R[k]);
+  }
 
-  const bodyM = (pt) => {
-    const c=Math.cos(-lean), sn=Math.sin(-lean);
-    return { x: hip.x + (pt.x*c - pt.y*sn)*K, y: hip.y + (pt.x*sn + pt.y*c)*K };
+  /* --- hips: drop and travel back on the drive, recover between strokes --- */
+  const load = clamp(0.30 + 0.70*stroke, 0, 1) * (0.42 + 0.58*E);
+  const hipUnit = Math.abs(HUMAN.restHip.y) || 1;  // bone units, whatever the rig uses
+  B.Hips.position.copy(HUMAN.restHip);
+  B.Hips.position.z -= hipUnit * HUMAN.hipBack * load;   // model faces +Z, so back is -Z
+  B.Hips.position.y -= hipUnit * HUMAN.hipDrop * load;
+  B.Hips.quaternion.copy(R.Hips)
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.34*load));
+
+  /* --- spine: the lean is spread over three joints, plus a little counter-twist --- */
+  /* shoulders travel back over tucked hips — the posture you actually take on a rope */
+  const leanEach = -(0.11 + 0.19*E)*(0.4+0.6*stroke);
+  for(const [k,w] of [["Spine",1.0],["Spine1",0.85],["Spine2",0.6]]){
+    if(!B[k]) continue;
+    B[k].quaternion.copy(R[k])
+      .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), leanEach*w))
+      .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,1,0), 0.06*w*(1-stroke)));
+  }
+  /* head stays on the rope, chin tucking as he strains */
+  if(B.Neck) B.Neck.quaternion.copy(R.Neck)
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.16+0.22*load));
+  if(B.Head) B.Head.quaternion.copy(R.Head)
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.10+0.12*load));
+
+  HUMAN.root.updateMatrixWorld(true);
+
+  /* --- arms: IK onto the grip points, elbows poled down and out --- */
+  const armZ = 40;
+  for(const [side, g] of [["Left", gA], ["Right", gB]]){
+    const up=B[side+"Arm"], fore=B[side+"ForeArm"], hand=B[side+"Hand"];
+    if(!up||!fore||!hand) continue;
+    _gT.set(vx(g.x), vy(g.y), armZ + (side==="Left" ? 16 : -14));
+    _pole.set(vx(g.x - reach*0.9), vy(g.y + reach*1.2), armZ - 40);
+    ccdIK([up, fore], hand, _gT, 4);
+    pole(up, fore, _gT, _pole);
+    ccdIK([fore], hand, _gT, 2);        // forearm only: a full pass would undo the pole
+    /* wrist lines the hand up with the rope */
+    const wq=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1,0,0), new THREE.Vector3(rdx,-rdy,0));
+    applyWorldDelta(hand, wq.slerp(new THREE.Quaternion(), 0.55));
+  }
+
+  /* --- legs: IK onto planted feet, so the knees absorb the hip drop --- */
+  const fY = humanGroundY;
+  const plant = {
+    Left : { x: humanX + HUMAN.stanceFront, y: fY },     // front foot, braced toward the rope
+    Right: { x: humanX - HUMAN.stanceBack,  y: fY },     // back foot, driving
   };
-
-  const headP=bodyM(RIG.headRel);
-  const headTilt=(0.06+0.16*E)*(0.5+0.5*stroke);
-  rig.head.position.set(vx(headP.x), vy(headP.y), 0);
-  rig.head.rotation.z=lean*0.55+headTilt;
-  rig.head.rotation.y=-0.30+Math.sin(T*0.9)*0.04-E*0.05;
-  rig.head.rotation.x=-0.05-E*0.10;
-
-  const squint=clamp(1-E*0.5-blink, 0.08, 1);
-  rig.eyeL.scale.set(1,squint,1);
-  rig.eyeR.scale.set(1,squint,1);
-  rig.browL.position.y=19-5.5*E; rig.browL.rotation.z=-0.32*E;
-  rig.browR.position.y=22-5*E;   rig.browR.rotation.z=-0.28*E;
-  rig.mouth.scale.set(1+E*0.45, 1+E*1.5, 1+E*0.3);
-  rig.earL.rotation.z=earTwitch*0.22-E*0.16;
-  rig.earR.rotation.z=earTwitch*0.16-E*0.13;
-
-  const fistF=place(rig.armF, rig.handF, bodyM(RIG.shF), handF, RIG.armUp, RIG.armFore, -1, 30*K);
-  const fistB=place(rig.armB, rig.handB, bodyM(RIG.shB), handB, RIG.armUp, RIG.armFore, -1, -30*K);
-
-  const spread=1+E*0.2;
-  const hipFA=bodyM(RIG.hipF), hipBA=bodyM(RIG.hipB);
-  /* no floor out here: both legs stay straight and brace off the frame edge, which reads
-     as leaning in rather than as two folded stubs */
-  const footFT={ x:-W*0.03-4*E, y:hips.y+(70+10*E)*spread*K };
-  const footBT={ x:-W*0.07,     y:hips.y+(24+10*E)*spread*K };
-  place(rig.legF, rig.footF, hipFA, footFT, RIG.legUp, RIG.legLo, 1,  34*K);
-  place(rig.legB, rig.footB, hipBA, footBT, RIG.legUp, RIG.legLo, 1, -30*K);
-
-  /* tail: swept tube streaming back off the frame with a travelling wave */
-  let tp=bodyM(RIG.tailRel), ta=Math.PI*0.94-lean*0.5;
-  const segLen=13*K;
-  for(let i=0;i<_tailPts.length;i++){
-    _tailPts[i].x=vx(tp.x); _tailPts[i].y=vy(tp.y); _tailPts[i].z=-20*K;
-    tp={ x: tp.x+Math.cos(ta)*segLen, y: tp.y+Math.sin(ta)*segLen };
-    ta += -0.09-0.07*E + Math.sin(T*4.2-i*0.6)*(0.07+0.11*E);
-  }
-  updateTube(rig.tail, _tailPts, 6.5*K, t => 1-t*0.78);
-
-  const sOp=clamp((E-0.42)*2.2, 0, 0.85);
-  const temple=bodyM({x:RIG.foreheadRel.x-6, y:RIG.foreheadRel.y-6});
-  for(let i=0;i<strain.length;i++){
-    const {m,mat}=strain[i];
-    mat.opacity=sOp;
-    m.scale.setScalar(K);
-    m.position.set(vx(temple.x+(i-1)*13*K), vy(temple.y-14*K-Math.abs(i-1)*5*K), 30*K);
-    m.rotation.z=-(0.42*(i-1));
+  for(const side of ["Left","Right"]){
+    const up=B[side+"UpLeg"], lo=B[side+"Leg"], foot=B[side+"Foot"];
+    if(!up||!lo||!foot) continue;
+    const pt=plant[side];
+    _gT.set(vx(pt.x), vy(pt.y), (side==="Left" ? 26 : -30));
+    _pole.set(vx(pt.x + HUMAN.reach*0.9), vy(pt.y - HUMAN.reach*0.6), 140);
+    ccdIK([up, lo], foot, _gT, 4);
+    pole(up, lo, _gT, _pole);
+    ccdIK([lo], foot, _gT, 2);          // shin only, same reason
+    /* keep the sole roughly flat on the ground */
+    const fq=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,-1,0), new THREE.Vector3(0.25,-1,0).normalize());
+    applyWorldDelta(foot, fq.slerp(new THREE.Quaternion(), 0.45));
   }
 
-  tugPulse=stroke*E;
-  const yank=CFG.rope.tugAmp*tugPulse;
-  anchorL.x=anchorBase.x-rdx*yank;
-  anchorL.y=anchorBase.y-rdy*yank;
+  /* --- the rope end gets yanked toward him on every stroke --- */
+  tugPulse = stroke*E;
+  const yank = CFG.rope.tugAmp*tugPulse;
+  anchorL.x = anchorBase.x - rdx*yank;
+  anchorL.y = anchorBase.y - rdy*yank;
 
-  const gw=A.grip+B.grip||1;
-  fistW.x=(fistF.x*A.grip+fistB.x*B.grip)/gw;
-  fistW.y=(fistF.y*A.grip+fistB.y*B.grip)/gw;
-  fistBackW.x=Math.min(fistF.x,fistB.x); fistBackW.y=Math.max(fistF.y,fistB.y);
+  /* whichever fist is loaded owns where the free end bends */
+  const gw = A.grip + Bs.grip || 1;
+  fistW.x = (gA.x*A.grip + gB.x*Bs.grip)/gw;
+  fistW.y = (gA.y*A.grip + gB.y*Bs.grip)/gw;
 
-  foreheadAbs=bodyM(RIG.foreheadRel);
-  if(!reduced){
-    sweatTimer-=dt;
-    if(E>0.40 && sweatTimer<=0){ sweatTimer=lerp(0.24,0.10,E); spawnSweat(E); }
+  /* sweat off the brow */
+  if(!reduced && B.Head){
+    const hp = bonePos(B.Head, IK.v0);
+    foreheadAbs = { x: hp.x + W/2, y: H/2 - hp.y };
+    sweatTimer -= dt;
+    if(E>0.42 && sweatTimer<=0){ sweatTimer=lerp(0.26,0.11,E); spawnSweat(E); }
   }
 }
+
 function spawnSweat(E){
   const d=sweat.find(s=>s.life<=0); if(!d) return;
-  d.x=foreheadAbs.x+(Math.random()*14-7)*K;
-  d.y=foreheadAbs.y+(Math.random()*10-4)*K;
-  d.z=(14+Math.random()*18)*K;
-  d.vx=(50+Math.random()*110)*(0.6+E)*K;
-  d.vy=(-100-Math.random()*120)*(0.6+E)*K;
-  d.life=0.85+Math.random()*0.45;
-  d.r=(2.8+Math.random()*1.8)*K;
+  const sc = HUMAN.scale*100;
+  d.x=foreheadAbs.x+(Math.random()*12-6);
+  d.y=foreheadAbs.y-6+(Math.random()*8-4);
+  d.z=40+Math.random()*30;
+  d.vx=(60+Math.random()*110)*(0.6+E);
+  d.vy=(-110-Math.random()*130)*(0.6+E);
+  d.life=0.8+Math.random()*0.4;
+  d.r=2.6+Math.random()*1.6;
   d.m.visible=true;
 }
 function stepParticles(dt){
   for(const d of sweat){
     if(d.life<=0){ if(d.m.visible) d.m.visible=false; continue; }
-    d.life-=dt; d.vy+=1000*dt*K;
+    d.life-=dt; d.vy+=1000*dt;
     d.x+=d.vx*dt; d.y+=d.vy*dt;
     d.mat.opacity=0.92*clamp(d.life*1.5,0,1);
-    const stretch=clamp(1+Math.abs(d.vy)/(900*K),1,1.8);
+    const stretch=clamp(1+Math.abs(d.vy)/900,1,1.8);
     d.m.position.set(vx(d.x), vy(d.y), d.z);
     d.m.scale.set(d.r, d.r*stretch, d.r);
     d.m.rotation.z=-Math.atan2(d.vy,d.vx)-Math.PI/2;
@@ -1115,8 +1174,9 @@ function setThread(g, a, corner){
    ===================================================================== */
 let last=performance.now(), acc=0, ready=false;
 const FIXED=1/60;
-window.__jerry = { rope, cards, CFG, rig,
+window.__jerry = { rope, cards, CFG, HUMAN,
   simStep: () => tick(FIXED),
+  ropeStep: () => drawRope(),
   renderInfo: () => ({ triangles: renderer.info.render.triangles, calls: renderer.info.render.calls, programs: renderer.info.programs.length }),
   get state(){ return {ready,W,H,K,cardW,cardH,step,s0,lenRatio,scroll,target,scrollV,index,T,u,effort,effortS,gust,anchorL,anchorR}; } };
 
@@ -1166,7 +1226,7 @@ function tick(dt){
   if(nextTwitch<=0){ nextTwitch=2.6+Math.random()*4; earTwitch=1; }
   earTwitch=Math.max(0, earTwitch-dt*5.5);
 
-  poseJerry(dt);
+  if(HUMAN.ready) poseHuman(dt);
   placeCards(dt);
   stepRope(dt, reduced ? 0 : gust, effortS);
   stepParticles(dt);
@@ -1178,7 +1238,7 @@ function tick(dt){
 function build(){
   if(!layout()) return false;
   anchorL={ ...anchorBase };
-  for(let i=0;i<90;i++){ poseJerry(FIXED); placeCards(FIXED); stepRope(FIXED, 0.2, 0); }
+  for(let i=0;i<90;i++){ if(HUMAN.ready) poseHuman(FIXED); placeCards(FIXED); stepRope(FIXED, 0.2, 0); }
   drawRope();
   renderer.render(scene, camera);
   ready=true;
@@ -1203,6 +1263,12 @@ new ResizeObserver(() => {
     scroll=frac*step; target=Math.round(frac)*step; scrollV=0;
   }, 120);
 }).observe(stage);
+
+/* the character arrives asynchronously; the scene runs without him until it does */
+try {
+  const bin = Uint8Array.from(atob(window.__PULLER_GLB_B64), c => c.charCodeAt(0)).buffer;
+  new THREE.GLTFLoader().parse(bin, "", initHuman, err => console.error("puller failed to load", err));
+} catch(err){ console.error("puller data missing", err); }
 
 init();
 }
