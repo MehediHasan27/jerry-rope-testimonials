@@ -647,6 +647,52 @@ function applyWorldDelta(bone, q){
 }
 /* cyclic-coordinate-descent onto a world target */
 
+
+/* A fist only reads as gripping if the ROPE sits in the palm — and the arm IK aims the
+   WRIST, which is a whole hand-length away. So: capture the hand's own axes at bind (fingers
+   direction, across-palm direction), then each frame build the orientation that lays the rope
+   across the palm, and offset the IK target back down the fingers axis so the palm, not the
+   wrist, lands on the rope. */
+const HAND = { xL:{}, zL:{}, yL:{}, palm:{}, q0:{},
+               mW:new THREE.Matrix4(), mL:new THREE.Matrix4(),
+               x:new THREE.Vector3(), y:new THREE.Vector3(), z:new THREE.Vector3(),
+               q:new THREE.Quaternion(), v:new THREE.Vector3(), w:new THREE.Vector3() };
+function captureHandBind(){
+  if(HAND.ready) return;
+  for(const side of ["Left","Right"]){
+    const h=HUMAN.B[side+"Hand"], mid=HUMAN.B[side+"HandMiddle1"],
+          idx=HUMAN.B[side+"HandIndex1"], pky=HUMAN.B[side+"HandPinky1"];
+    if(!h||!mid||!idx||!pky) return;
+    for(const b of [h,mid,idx,pky]) b.updateWorldMatrix(true,false);
+    const hp=new THREE.Vector3().setFromMatrixPosition(h.matrixWorld);
+    const mp=new THREE.Vector3().setFromMatrixPosition(mid.matrixWorld);
+    const ip=new THREE.Vector3().setFromMatrixPosition(idx.matrixWorld);
+    const pp=new THREE.Vector3().setFromMatrixPosition(pky.matrixWorld);
+    const q0=h.getWorldQuaternion(new THREE.Quaternion());
+    const inv=q0.clone().invert();
+    const xW=mp.clone().sub(hp); const palm=xW.length()||1; xW.divideScalar(palm);
+    const zW=ip.clone().sub(pp).normalize();
+    HAND.xL[side]=xW.clone().applyQuaternion(inv).normalize();
+    HAND.zL[side]=zW.clone().applyQuaternion(inv).normalize();
+    HAND.yL[side]=new THREE.Vector3().crossVectors(HAND.zL[side], HAND.xL[side]).normalize();
+    HAND.palm[side]=palm;
+    HAND.q0[side]=q0;
+  }
+  HAND.ready = true;
+}
+/* rope lies across the palm: fingers perpendicular to it, curling around it */
+function handGripQuat(side, ropeDirW, out){
+  HAND.z.copy(ropeDirW).normalize();
+  HAND.x.set(0,0,1).cross(HAND.z);                     // perpendicular, in the screen plane
+  if(HAND.x.lengthSq() < 1e-6) HAND.x.set(1,0,0);
+  HAND.x.normalize();
+  if(HAND.x.y > 0) HAND.x.negate();                    // fingers wrap from above
+  HAND.y.crossVectors(HAND.z, HAND.x).normalize();
+  HAND.mW.makeBasis(HAND.x, HAND.y, HAND.z);
+  HAND.mL.makeBasis(HAND.xL[side], HAND.yL[side], HAND.zL[side]).transpose();
+  return out.setFromRotationMatrix(HAND.mW.multiply(HAND.mL));
+}
+
 /* CCD accumulates twist down a chain, which is what screwed the ankle. This solves a
    two-bone limb analytically instead: work out the knee position in world space, then set
    each bone's world orientation as "bind orientation, rotated so its bone axis points where
@@ -857,10 +903,10 @@ function stepRings(dt){
     if(r.delay>0){ r.delay-=dt; r.m.visible=false; continue; }
     r.life -= dt*1.35;
     const k = 1-clamp(r.life,0,1);
-    const size = stature*(0.30 + 0.34*k) * (0.75+0.35*r.power);
+    const size = stature*(0.15 + 0.17*k) * (0.75+0.35*r.power);   // kept small and close
     r.m.visible = true;
     /* well clear of the head volume, or the arcs render inside her hair */
-    r.m.position.set(hp.x + r.side*ear*2.6, hp.y + stature*0.02, hp.z + stature*0.30);
+    r.m.position.set(hp.x + r.side*ear*1.9, hp.y + stature*0.015, hp.z + stature*0.26);
     r.m.scale.setScalar(size);
     r.m.rotation.z = (r.side < 0 ? Math.PI : 0) + r.tilt;   // arcs open away from the head
     r.mat.opacity = Math.pow(clamp(r.life,0,1),0.7)*0.55*(0.45+0.55*r.power);
@@ -1246,14 +1292,14 @@ function drawRope(){
     const t=i/(_freePts.length-1);
     let x,y,z;
     if(t<hiT){                                   // taut line into the leading fist
-      const k=t/hiT; x=lerp(a.x,f.x,k); y=lerp(a.y,f.y,k); z=lerp(0,26,k);
+      const k=t/hiT; x=lerp(a.x,f.x,k); y=lerp(a.y,f.y,k); z=lerp(0,f.z,k);
     } else if(t<loT){                            // the short span between the two fists
-      const k=(t-hiT)/(loT-hiT); x=lerp(f.x,g2.x,k); y=lerp(f.y,g2.y,k); z=lerp(26,44,k);
+      const k=(t-hiT)/(loT-hiT); x=lerp(f.x,g2.x,k); y=lerp(f.y,g2.y,k); z=lerp(f.z,g2.z,k);
     } else {                                     // slack falling away to the frame edge
       const k=(t-loT)/(1-loT), m=1-k;
       x = m*m*m*g2.x + 3*m*m*k*c1.x + 3*m*k*k*c2.x + k*k*k*p3.x;
       y = m*m*m*g2.y + 3*m*m*k*c1.y + 3*m*k*k*c2.y + k*k*k*p3.y;
-      z = 44 - 74*k;
+      z = g2.z - (g2.z+30)*k;
     }
     _freePts[i].x=vx(x); _freePts[i].y=vy(y); _freePts[i].z=z;
     _freeArc[i] = i ? _freeArc[i-1] + Math.hypot(_freePts[i].x-_freePts[i-1].x, _freePts[i].y-_freePts[i-1].y, _freePts[i].z-_freePts[i-1].z) : 0;
@@ -1276,7 +1322,7 @@ const gripS={Left:0, Right:0};                 // how closed each fist is
 const footOff={Left:0, Right:0};               // per-foot re-brace offset
 let footDrift=0;
 const STEP={active:false, side:"Right", t:0, from:0, to:0};
-let fistW={x:0,y:0}, fistBackW={x:0,y:0}, fistHi={x:0,y:0}, fistLo={x:0,y:0};
+let fistW={x:0,y:0}, fistBackW={x:0,y:0}, fistHi={x:0,y:0,z:0}, fistLo={x:0,y:0,z:0};
 const drag={active:false,id:null,x0:0,scroll0:0,dx:0,lastX:0,lastT:0,vel:0,moved:false};
 
 function goTo(i){ target=i*step; announce(i); }
@@ -1446,25 +1492,27 @@ function poseHuman(dt){
 
   HUMAN.root.updateMatrixWorld(true);
 
-  /* --- arms: IK onto the two fists, elbow driving back behind the torso --- */
+  /* --- arms: solved so the PALM lands on the rope, not the wrist --- */
+  captureBind(["LeftArm","LeftForeArm","LeftHand","RightArm","RightForeArm","RightHand"]);
+  captureHandBind();
   const armZ = 40;
-  /* the fists run along this diagonal, so the wrists line up with it rather than with the
-     horizontal line — that is what stopped the hands reading as broken */
   const dgx = gripLow.x-grip.x, dgy = gripLow.y-grip.y;
   const dgl = Math.hypot(dgx,dgy)||1;
-  for(const [side, g] of [["Left", gA], ["Right", gB]]){
-    const up=B[side+"Arm"], fore=B[side+"ForeArm"], hand=B[side+"Hand"];
-    if(!up||!fore||!hand) continue;
+  const ropeDirW = HAND.w.set(dgx/dgl, -dgy/dgl, 0.16).normalize();
+  if(HAND.ready) for(const [side, g] of [["Left", gA], ["Right", gB]]){
+    const hand=B[side+"Hand"];
+    if(!hand || !HUMAN.bind[side+"Arm"]) continue;
     const zOut = armZ + (side==="Left" ? 20 : -16) + g.st*46 + g.out*18;
-    _gT.set(vx(g.x), vy(g.y), zOut);
-    /* elbow poles down and BACK past the ribs on the pull, and swings out on recovery */
-    _pole.set(vx(g.x - reach*(1.05 - 0.5*g.out)), vy(g.y + reach*0.55), zOut - 60 + g.out*80);
-    ccdIK([up, fore], hand, _gT, 4);
-    pole(up, fore, _gT, _pole);
-    ccdIK([fore], hand, _gT, 2);        // forearm only: a full pass would undo the pole
-    const wq=new THREE.Quaternion().setFromUnitVectors(
-      new THREE.Vector3(1,0,0), new THREE.Vector3(dgx/dgl, -dgy/dgl, 0));
-    applyWorldDelta(hand, wq.slerp(new THREE.Quaternion(), 0.35));
+    g.z = zOut;
+    /* where the rope should sit in the palm */
+    handGripQuat(side, ropeDirW, HAND.q);
+    /* wrist target = palm target pulled back along the fingers axis by a hand length */
+    HAND.v.copy(HAND.xL[side]).applyQuaternion(HAND.q).multiplyScalar(HAND.palm[side]);
+    _gT.set(vx(g.x) - HAND.v.x, vy(g.y) - HAND.v.y, zOut - HAND.v.z);
+    /* elbow drives down and back past the ribs, swinging out on the recovery */
+    _pole.set(-(1.0 - 0.5*g.out), -0.75, -0.35 + g.out*1.1).normalize();
+    solveLimb(side+"Arm", side+"ForeArm", side+"Hand", _gT, _pole, 0);
+    setBoneWorldQuat(hand, HAND.q);
   }
 
   /* --- legs: IK onto planted feet, so the knees absorb the hip drop --- */
@@ -1498,6 +1546,7 @@ function poseHuman(dt){
     Left : { x: humanX + HUMAN.stanceFront + footDrift - footOff.Left,  y: fY - (STEP.active&&STEP.side==="Left"  ? stepLift : 0) },
     Right: { x: humanX - HUMAN.stanceBack  + footDrift - footOff.Right, y: fY - (STEP.active&&STEP.side==="Right" ? stepLift : 0) },
   };
+
   captureBind(["LeftUpLeg","LeftLeg","LeftFoot","RightUpLeg","RightLeg","RightFoot"]);
   for(const side of ["Left","Right"]){
     if(!B[side+"UpLeg"]) continue;
@@ -1528,8 +1577,8 @@ function poseHuman(dt){
   /* the loose end threads through BOTH fists in order — high one first, then the low one,
      then away — which is what makes the grip read as a grip */
   const lo = A.s >= Bs.s ? gA : gB, hi = A.s >= Bs.s ? gB : gA;
-  fistHi.x = hi.x; fistHi.y = hi.y;
-  fistLo.x = lo.x; fistLo.y = lo.y;
+  fistHi.x = hi.x; fistHi.y = hi.y; fistHi.z = hi.z || 0;
+  fistLo.x = lo.x; fistLo.y = lo.y; fistLo.z = lo.z || 0;
   fistW.x = hi.x;  fistW.y = hi.y;
 
   /* sweat off the brow */
