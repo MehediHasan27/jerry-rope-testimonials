@@ -646,6 +646,73 @@ function applyWorldDelta(bone, q){
   bone.updateMatrixWorld(true);
 }
 /* cyclic-coordinate-descent onto a world target */
+
+/* CCD accumulates twist down a chain, which is what screwed the ankle. This solves a
+   two-bone limb analytically instead: work out the knee position in world space, then set
+   each bone's world orientation as "bind orientation, rotated so its bone axis points where
+   it should". No twist can creep in, and the knee can only sit in the plane we choose. */
+const LIMB = { p:new THREE.Vector3(), u:new THREE.Vector3(), n:new THREE.Vector3(),
+               k:new THREE.Vector3(), d:new THREE.Vector3(),
+               q:new THREE.Quaternion(), pq:new THREE.Quaternion(), cur:new THREE.Quaternion() };
+function captureBind(names){
+  if(HUMAN.bind) return;
+  HUMAN.bind = {};
+  for(const n of names){
+    const b = HUMAN.B[n];
+    if(!b) continue;
+    const child = b.children.find(c => c.isBone) || b.children[0];
+    b.updateWorldMatrix(true,false);
+    const bp = new THREE.Vector3().setFromMatrixPosition(b.matrixWorld);
+    const q  = b.getWorldQuaternion(new THREE.Quaternion());
+    let axis = new THREE.Vector3(0,1,0), len = 1;
+    if(child){
+      child.updateWorldMatrix(true,false);
+      const cp = new THREE.Vector3().setFromMatrixPosition(child.matrixWorld);
+      axis = cp.clone().sub(bp);
+      len = axis.length() || 1;
+      axis.divideScalar(len);
+    }
+    HUMAN.bind[n] = { q, axis, len };
+  }
+}
+function setBoneWorldQuat(bone, qW){
+  bone.parent.getWorldQuaternion(LIMB.pq).invert();
+  bone.quaternion.copy(LIMB.pq.multiply(qW));
+  bone.updateWorldMatrix(false,false);
+}
+function aimBone(name, dirW){
+  const bind = HUMAN.bind[name], b = HUMAN.B[name];
+  if(!bind || !b) return;
+  setBoneWorldQuat(b, LIMB.q.setFromUnitVectors(bind.axis, dirW).multiply(bind.q));
+}
+/* targetW: world position for the tip. kneeFwd: which way the joint should break. */
+function solveLimb(rootName, midName, tipName, targetW, kneeFwd, levelWeight){
+  const bindR = HUMAN.bind[rootName], bindM = HUMAN.bind[midName];
+  const rootB = HUMAN.B[rootName];
+  if(!bindR || !bindM || !rootB) return;
+  rootB.updateWorldMatrix(true,false);
+  LIMB.p.setFromMatrixPosition(rootB.matrixWorld);
+  const L1 = bindR.len, L2 = bindM.len;
+  LIMB.u.copy(targetW).sub(LIMB.p);
+  let d = LIMB.u.length() || 1e-4;
+  LIMB.u.divideScalar(d);
+  d = clamp(d, Math.abs(L1-L2)+1e-3, L1+L2-1e-3);
+  const a = (d*d + L1*L1 - L2*L2)/(2*d);
+  const h = Math.sqrt(Math.max(0, L1*L1 - a*a));
+  LIMB.n.copy(kneeFwd).addScaledVector(LIMB.u, -kneeFwd.dot(LIMB.u));
+  if(LIMB.n.lengthSq() < 1e-6) LIMB.n.set(0,0,1);
+  LIMB.n.normalize();
+  LIMB.k.copy(LIMB.p).addScaledVector(LIMB.u, a).addScaledVector(LIMB.n, h);
+  aimBone(rootName, LIMB.d.copy(LIMB.k).sub(LIMB.p).normalize());
+  aimBone(midName,  LIMB.d.copy(targetW).sub(LIMB.k).normalize());
+  /* the foot goes back to its bind orientation, i.e. sole flat, however the leg bent */
+  const tip = HUMAN.B[tipName], bindT = HUMAN.bind[tipName];
+  if(tip && bindT && levelWeight > 0){
+    tip.getWorldQuaternion(LIMB.cur);
+    setBoneWorldQuat(tip, LIMB.cur.slerp(bindT.q, levelWeight));
+  }
+}
+
 function ccdIK(chain, tip, targetW, iters){
   for(let it=0; it<iters; it++){
     for(let i=chain.length-1; i>=0; i--){
@@ -822,6 +889,7 @@ const AUDIO = {
   playing:false, source:null, el:null,
   track:"lofi", bpm:82,
   level:0, bass:0, beat:0, beatAt:0, bassAvg:0,
+  beatQueue:[], beatDur:60/82, lastBeat:0, phase:0, hasClock:false,
 };
 
 const GROOVES = {
@@ -900,6 +968,11 @@ function seqTick(){
     const i = SEQ.step % 16;
     const swing = (i%2 ? g.swing*spStep : 0);
     const t = SEQ.next + swing;
+    if(i%4===0){                                   // we schedule the music, so we know the
+      AUDIO.beatQueue.push(t);                     // downbeats exactly — no guessing needed
+      AUDIO.beatDur = spb;
+      AUDIO.hasClock = true;
+    }
     if(pat.kick[i])  vKick(t, 0.9);
     if(pat.snare[i]) vNoise(t, 0.16, 1300, 0.34);
     if(pat.hat[i])   vNoise(t, 0.045, 6500, 0.13);
@@ -913,6 +986,7 @@ function seqTick(){
 function grooveStart(){
   const c=audioInit(); if(!c) return;
   grooveStop();
+  AUDIO.beatQueue.length=0; AUDIO.hasClock=false;
   SEQ.step=0; SEQ.next=c.currentTime+0.06;
   SEQ.timer=setInterval(seqTick, 25);
   seqTick();
@@ -929,6 +1003,7 @@ function playFile(file){
   const src=c.createMediaElementSource(el);
   src.connect(AUDIO.master);
   AUDIO.el=el; AUDIO.source=src; AUDIO.track="file";
+  AUDIO.hasClock=false; AUDIO.beatQueue.length=0;   // an unknown track: fall back to listening
   el.play().catch(()=>{});
 }
 
@@ -959,11 +1034,29 @@ function audioSample(dt){
   AUDIO.bass = bass;
   AUDIO.level = lerp(AUDIO.level, all, 1-Math.pow(0.001,dt));
   AUDIO.bassAvg = lerp(AUDIO.bassAvg, bass, 1-Math.pow(0.2,dt));
-  const now = performance.now();
-  if(bass > AUDIO.bassAvg*1.28 + 0.04 && now - AUDIO.beatAt > 170){
-    AUDIO.beatAt = now;
-    AUDIO.beat = 1;
-    onBeat();
+  /* Rhythm: for the built-in grooves the sequencer hands us the downbeat times, so the body
+     is phase-locked to the music instead of chasing bass spikes — that erratic chase is what
+     made the head look like it was banging at random. A loaded track has no clock, so there
+     we do listen, but only for a downbeat-rate pulse. */
+  const ct = AUDIO.ctx.currentTime;
+  if(AUDIO.hasClock){
+    while(AUDIO.beatQueue.length && AUDIO.beatQueue[0] <= ct){
+      AUDIO.lastBeat = AUDIO.beatQueue.shift();
+      AUDIO.beat = 1;
+      onBeat();
+    }
+    AUDIO.phase = AUDIO.beatDur > 0 ? clamp((ct - AUDIO.lastBeat)/AUDIO.beatDur, 0, 1) : 0;
+  } else {
+    const now = performance.now();
+    if(bass > AUDIO.bassAvg*1.3 + 0.05 && now - AUDIO.beatAt > 240){
+      const gap = (now - AUDIO.beatAt)/1000;
+      if(gap > 0.24 && gap < 1.6) AUDIO.beatDur = lerp(AUDIO.beatDur, gap, 0.3);  // learn the tempo
+      AUDIO.beatAt = now;
+      AUDIO.lastBeat = ct;
+      AUDIO.beat = 1;
+      onBeat();
+    }
+    AUDIO.phase = AUDIO.beatDur > 0 ? clamp((ct - AUDIO.lastBeat)/AUDIO.beatDur, 0, 1) : 0;
   }
   AUDIO.beat = Math.max(0, AUDIO.beat - dt*3.4);
 }
@@ -1269,7 +1362,11 @@ function poseHuman(dt){
      it reading as a bobblehead. Damped down while the rope is actually loaded. */
   /* bass energy carries a beat far better than overall level, which sits low */
   const groove = clamp(AUDIO.level*5.5 + AUDIO.bass*0.55, 0, 1) * (0.35 + 0.65*idle);
-  bobV += (Math.pow(AUDIO.beat,0.6)*1.6 - bob)*62*dt - bobV*8.5*dt;   // sharp attack, soft settle
+  /* one clean nod per beat, shaped by where we are inside the beat rather than by an
+     impulse train: down fast on the beat, lifting again by the next one */
+  const ph = AUDIO.playing ? AUDIO.phase : 0;
+  const nod = AUDIO.playing ? Math.pow(Math.max(0, Math.sin(Math.PI*(0.10 + 0.9*ph))), 1.6) : 0;
+  bobV += (nod*1.25 - bob)*54*dt - bobV*9.5*dt;
   bob  += bobV*dt;
   const bobA = bob*groove*(reduced ? 0.2 : 1);
 
@@ -1401,24 +1498,15 @@ function poseHuman(dt){
     Left : { x: humanX + HUMAN.stanceFront + footDrift - footOff.Left,  y: fY - (STEP.active&&STEP.side==="Left"  ? stepLift : 0) },
     Right: { x: humanX - HUMAN.stanceBack  + footDrift - footOff.Right, y: fY - (STEP.active&&STEP.side==="Right" ? stepLift : 0) },
   };
+  captureBind(["LeftUpLeg","LeftLeg","LeftFoot","RightUpLeg","RightLeg","RightFoot"]);
   for(const side of ["Left","Right"]){
-    const up=B[side+"UpLeg"], lo=B[side+"Leg"], foot=B[side+"Foot"];
-    if(!up||!lo||!foot) continue;
+    if(!B[side+"UpLeg"]) continue;
     const pt=plant[side], front = side==="Left";
     _gT.set(vx(pt.x), vy(pt.y), (front ? 30 : -34));
-    /* Front leg reads long and braced, back leg takes the deep bend — the knee pole sits
-       forward of the foot for both, so neither knee can fold backwards. */
-    _pole.set(vx(pt.x + HUMAN.reach*(front ? 1.5 : 0.75)),
-              vy(pt.y - HUMAN.reach*(front ? 0.95 : 0.35)),
-              (front ? 190 : 120));
-    ccdIK([up, lo], foot, _gT, 4);
-    pole(up, lo, _gT, _pole);
-    ccdIK([lo], foot, _gT, 2);          // shin only, same reason
-    /* soles sit flat on the floor, as they do when someone is really braced */
-    const lift = STEP.active && STEP.side===side ? 0.55 : 0;
-    const fq=new THREE.Quaternion().setFromUnitVectors(
-      new THREE.Vector3(0,-1,0), new THREE.Vector3(front ? 0.14 : 0.10, -1, 0).normalize());
-    applyWorldDelta(foot, fq.slerp(new THREE.Quaternion(), 0.90 - lift*0.55));
+    /* knees break forward, toward the rope she is pulling against */
+    _pole.set(1, front ? 0.25 : 0.05, front ? 0.5 : 0.2).normalize();
+    const lift = STEP.active && STEP.side===side ? 0.5 : 0;
+    solveLimb(side+"UpLeg", side+"Leg", side+"Foot", _gT, _pole, 0.92 - lift*0.6);
   }
 
   /* --- a loaded fist visibly bends the line into it --- */
