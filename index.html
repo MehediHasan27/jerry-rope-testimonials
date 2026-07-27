@@ -233,6 +233,7 @@ const CFG = {
     waveLenU:13.5,             // ripples across the width (~2 cycles)
     waveLenV:2.6,
     waveSpeed:4.0,
+    rake:95,                   // how far the hem hangs back from the line, in px
     curl:0.5,                  // how much the free bottom corners furl
   },
   human:{
@@ -629,7 +630,7 @@ const HUMAN = {
   ready:false, root:null, mesh:null, B:{}, rest:{},
   scale:1, ground:0, faceY:1.24, armLen:0, shoulder:{x:0,y:0},
   /* fractions of the rest hip height — the rig's bone units are not metres */
-  hipDrop:0.16, hipBack:0.26,
+  hipDrop:0.26, hipBack:0.34,      // deep braced squat, as in the reference
 };
 const IK = {
   v0:new THREE.Vector3(), v1:new THREE.Vector3(), v2:new THREE.Vector3(), v3:new THREE.Vector3(),
@@ -733,14 +734,34 @@ let humanX=0, humanGroundY=0;
 
 /* Sound coming out of the cups: rings that bloom on each beat and fade as they expand.
    Spawned from the head bone, so they track her nodding. */
-/* an arc, not a full ring: it reads as sound leaving the cup rather than a halo */
-const RING_GEO = new THREE.RingGeometry(0.90, 1, 30, 1, -0.55, 1.10);
+/* Sound out of the cups, painted rather than outlined: three arcs that fade at both ends
+   and outward, so they read as air moving instead of as circles. */
+function waveTexture(){
+  const c=document.createElement("canvas"); c.width=c.height=256;
+  const x=c.getContext("2d");
+  x.translate(128,128);
+  for(const [r,w,a] of [[46,9,1],[76,7,0.62],[104,5,0.34]]){
+    const g=x.createLinearGradient(0,-r,0,r);
+    g.addColorStop(0,   "rgba(255,255,255,0)");
+    g.addColorStop(0.32,`rgba(255,255,255,${a})`);
+    g.addColorStop(0.5, `rgba(255,255,255,${a})`);
+    g.addColorStop(0.68,`rgba(255,255,255,${a})`);
+    g.addColorStop(1,   "rgba(255,255,255,0)");
+    x.strokeStyle=g; x.lineWidth=w; x.lineCap="round";
+    x.beginPath(); x.arc(0,0,r,-0.62,0.62); x.stroke();
+  }
+  const t=new THREE.CanvasTexture(c);
+  t.colorSpace=THREE.SRGBColorSpace;
+  return t;
+}
+const WAVE_TEX = waveTexture();
+const RING_GEO = new THREE.PlaneGeometry(1,1);
 const rings = [];
 for(let i=0;i<14;i++){
-  const mat = new THREE.MeshBasicMaterial({ color:0xC2603C, transparent:true, opacity:0, side:THREE.DoubleSide, depthWrite:false });
+  const mat = new THREE.MeshBasicMaterial({ map:WAVE_TEX, color:0xC2603C, transparent:true, opacity:0, side:THREE.DoubleSide, depthWrite:false });
   const m = new THREE.Mesh(RING_GEO, mat);
   m.visible=false; scene.add(m);
-  rings.push({ m, mat, life:0, side:1, delay:0, power:0.5 });
+  rings.push({ m, mat, life:0, side:1, delay:0, power:0.5, tilt:0 });
 }
 /* two arcs per ear, the second trailing the first, so each beat leaves as a little wave train */
 function spawnRings(power){
@@ -750,6 +771,7 @@ function spawnRings(power){
     if(i>=want.length) break;
     if(r.life>0) continue;
     r.life=1; r.side=want[i][0]; r.delay=want[i][1]; r.power=power;
+    r.tilt=(Math.random()-0.5)*0.32;                     // never twice the same shape
     r.m.visible=false;
     i++;
   }
@@ -768,13 +790,13 @@ function stepRings(dt){
     if(r.delay>0){ r.delay-=dt; r.m.visible=false; continue; }
     r.life -= dt*1.35;
     const k = 1-clamp(r.life,0,1);
-    const size = stature*(0.055 + 0.155*k) * (0.75+0.45*r.power);
+    const size = stature*(0.30 + 0.34*k) * (0.75+0.35*r.power);
     r.m.visible = true;
     /* well clear of the head volume, or the arcs render inside her hair */
     r.m.position.set(hp.x + r.side*ear*2.6, hp.y + stature*0.02, hp.z + stature*0.30);
     r.m.scale.setScalar(size);
-    r.m.rotation.z = r.side < 0 ? Math.PI : 0;          // arcs open away from the head
-    r.mat.opacity = clamp(r.life,0,1)*0.62*(0.45+0.55*r.power);
+    r.m.rotation.z = (r.side < 0 ? Math.PI : 0) + r.tilt;   // arcs open away from the head
+    r.mat.opacity = Math.pow(clamp(r.life,0,1),0.7)*0.55*(0.45+0.55*r.power);
   }
 }
 function onBeat(){ if(!reduced) spawnRings(clamp(AUDIO.bass*1.6, 0.25, 1)); }
@@ -971,9 +993,9 @@ function layout(){
      stands, and the line lands at her chest. On phones she is shorter so the whole figure
      fits in frame instead of being sliced by the edge. */
   humanGroundY = H * (narrow ? 0.985 : 0.965);
-  const stature = H * (narrow ? 0.70 : 0.765);
+  const stature = H * (narrow ? 0.66 : 0.765);
   const lineY   = humanGroundY - stature*0.74;
-  humanX        = W * (narrow ? 0.14 : 0.085);
+  humanX        = W * (narrow ? 0.185 : 0.085);
   HUMAN.scale   = stature / 1.66;
   placeHuman();
 
@@ -986,8 +1008,10 @@ function layout(){
   anchorBase = { ...gripPoint };
   anchorR    = { x: W + cardW + 260, y: lineY - H*0.03 };
   anchorL    = { ...anchorBase };
-  HUMAN.stanceFront = armLen * 0.80;
-  HUMAN.stanceBack  = armLen * 0.62;
+  /* the reference brace is very wide; a phone stage cannot fit that and a readable card,
+     so the stance narrows there rather than letting her hang off the edge */
+  HUMAN.stanceFront = armLen * (narrow ? 0.66 : 1.16);
+  HUMAN.stanceBack  = armLen * (narrow ? 0.52 : 0.92);
 
   const camDist = (H/2) / Math.tan((camera.fov*Math.PI/180)/2);
   camera.aspect = W/H;
@@ -1119,25 +1143,27 @@ function drawRope(){
   updateRope(line, _linePts, _lineArc, CFG.rope.radius, CFG.rope.strandR, haulTravel);
   fibreTex.offset.x = -haulTravel * 120 / Math.max(1, visible);
 
-  /* the free end: from the gripping fist it drops away and leaves the lower-left */
-  const a=anchorL, f=fistW;
+  /* the free end: through the high fist, through the low fist, then away out of frame */
+  const a=anchorL, f=fistHi, g2=fistLo;
   const sway=Math.sin(T*1.15)*7 + tugPulse*10;
   const drop=H*0.30 + sway + slackPay;
-  const c1={x:f.x-30-tugPulse*16, y:f.y+drop*0.5}, c2={x:f.x-10, y:f.y+drop*1.1}, p3={x:-W*0.06, y:H*1.02};
-  let run=0, px=0, py=0;
-  for(let i=0;i<FREE_SAMPLES;i++){
-    const t=i/(FREE_SAMPLES-1);
-    let x,y;
-    if(t<0.16){ const k=t/0.16; x=lerp(a.x,f.x,k); y=lerp(a.y,f.y,k); }
-    else {
-      const k=(t-0.16)/0.84, m=1-k;
-      x = m*m*m*f.x + 3*m*m*k*c1.x + 3*m*k*k*c2.x + k*k*k*p3.x;
-      y = m*m*m*f.y + 3*m*m*k*c1.y + 3*m*k*k*c2.y + k*k*k*p3.y;
+  const c1={x:g2.x-26-tugPulse*14, y:g2.y+drop*0.5}, c2={x:W*0.05, y:g2.y+drop*1.15}, p3={x:-W*0.05, y:H*0.92};
+  const hiT=0.12, loT=0.26;
+  for(let i=0;i<_freePts.length;i++){
+    const t=i/(_freePts.length-1);
+    let x,y,z;
+    if(t<hiT){                                   // taut line into the leading fist
+      const k=t/hiT; x=lerp(a.x,f.x,k); y=lerp(a.y,f.y,k); z=lerp(0,26,k);
+    } else if(t<loT){                            // the short span between the two fists
+      const k=(t-hiT)/(loT-hiT); x=lerp(f.x,g2.x,k); y=lerp(f.y,g2.y,k); z=lerp(26,44,k);
+    } else {                                     // slack falling away to the frame edge
+      const k=(t-loT)/(1-loT), m=1-k;
+      x = m*m*m*g2.x + 3*m*m*k*c1.x + 3*m*k*k*c2.x + k*k*k*p3.x;
+      y = m*m*m*g2.y + 3*m*m*k*c1.y + 3*m*k*k*c2.y + k*k*k*p3.y;
+      z = 44 - 74*k;
     }
-    if(i>0) run += Math.hypot(x-px, y-py);
-    px=x; py=y;
-    _freePts[i].x=vx(x); _freePts[i].y=vy(y); _freePts[i].z=-20+30*Math.sin(t*2.4);
-    _freeArc[i]=run;
+    _freePts[i].x=vx(x); _freePts[i].y=vy(y); _freePts[i].z=z;
+    _freeArc[i] = i ? _freeArc[i-1] + Math.hypot(_freePts[i].x-_freePts[i-1].x, _freePts[i].y-_freePts[i-1].y, _freePts[i].z-_freePts[i-1].z) : 0;
   }
   updateRope(freeEnd, _freePts, _freeArc, CFG.rope.radius*0.96, CFG.rope.strandR*0.96, haulTravel);
 }
@@ -1157,7 +1183,7 @@ const gripS={Left:0, Right:0};                 // how closed each fist is
 const footOff={Left:0, Right:0};               // per-foot re-brace offset
 let footDrift=0;
 const STEP={active:false, side:"Right", t:0, from:0, to:0};
-let fistW={x:0,y:0}, fistBackW={x:0,y:0};
+let fistW={x:0,y:0}, fistBackW={x:0,y:0}, fistHi={x:0,y:0}, fistLo={x:0,y:0};
 const drag={active:false,id:null,x0:0,scroll0:0,dx:0,lastX:0,lastT:0,vel:0,moved:false};
 
 function goTo(i){ target=i*step; announce(i); }
@@ -1210,21 +1236,23 @@ stage.addEventListener("pointercancel", endDrag);
    torso rotates back over the hips, then release and reach again. The two hands are half
    a cycle apart, so one is always loaded. Effort deepens the crouch, the lean and the
    speed of it all. */
+/* scratch vectors, reused every frame */
+const _gT=new THREE.Vector3(), _pole=new THREE.Vector3(), _axis=new THREE.Vector3(0,0,1);
+
 function handStroke(phase){
-  const p=((phase%1)+1)%1, pullEnd=0.56;
-  /* t is a fraction of arm length along the rope, kept inside what the arm can actually
-     reach from the shoulder (grip sits at 0.62 of arm length ahead of it) */
-  if(p<pullEnd){                                   // loaded: hauls from far to near
+  const p=((phase%1)+1)%1, pullEnd=0.72;   // reference keeps both hands on the line
+  if(p<pullEnd){
+    /* loaded: the fist travels down and back along the rope, past the ribs to the far hip.
+       A beat of anticipation first — the hand settles further out before it drives. */
     const k=easeIO(p/pullEnd);
-    /* anticipation: the hand settles a touch further out before it drives back */
-    const anticip = Math.sin(Math.min(p/0.12,1)*Math.PI)*0.07;
-    return { t:lerp(0.34,-0.22,k)+anticip, lift:0, grip:1, drive:Math.sin(Math.PI*(p/pullEnd)) };
+    const anticip = Math.sin(Math.min(p/0.13,1)*Math.PI)*0.06;
+    return { s: clamp(k - anticip, 0, 1.05), out:0, grip:1, drive:Math.sin(Math.PI*(p/pullEnd)) };
   }
-  const k=easeIO((p-pullEnd)/(1-pullEnd));         // recovery: off the rope, reaching back out
-  return { t:lerp(-0.22,0.34,k), lift:Math.sin(Math.PI*k)*0.16, grip:0, drive:0 };
+  /* recovery: off the rope, swung out away from the chest and back up to the catch */
+  const k=easeIO((p-pullEnd)/(1-pullEnd));
+  return { s: 1-k, out: Math.sin(Math.PI*k), grip:0, drive:0 };
 }
 
-const _gT=new THREE.Vector3(), _pole=new THREE.Vector3(), _axis=new THREE.Vector3(0,0,1);
 function poseHuman(dt){
   const B=HUMAN.B, R=HUMAN.rest, grip=gripPoint;
 
@@ -1236,11 +1264,12 @@ function poseHuman(dt){
   const idle = 1 - clamp(effortS*3.5, 0, 1);
   headLag = lerp(headLag, leanS, 1-Math.pow(0.02, dt));
 
-  /* Nodding to whatever is in her headphones. She is working, so the bob is strongest
-     between hauls and gets damped down when the rope is actually loaded. */
+  /* Nodding to whatever is in her headphones — and not only the head: the chest counters
+     the nod, the hips drop a little on the beat and the knees take it, which is what stops
+     it reading as a bobblehead. Damped down while the rope is actually loaded. */
   /* bass energy carries a beat far better than overall level, which sits low */
   const groove = clamp(AUDIO.level*5.5 + AUDIO.bass*0.55, 0, 1) * (0.35 + 0.65*idle);
-  bobV += (AUDIO.beat*1.5 - bob)*46*dt - bobV*7.5*dt;
+  bobV += (Math.pow(AUDIO.beat,0.6)*1.6 - bob)*62*dt - bobV*8.5*dt;   // sharp attack, soft settle
   bob  += bobV*dt;
   const bobA = bob*groove*(reduced ? 0.2 : 1);
 
@@ -1261,11 +1290,19 @@ function poseHuman(dt){
   setGrip("Right", 0.25 + 0.75*gripS.Right);
   const reach = HUMAN.reach;                       // px his arms can span
 
-  /* the two grip points, sliding along the rope */
-  const gA={ x:grip.x+rdx*A.t*reach,  y:grip.y+rdy*A.t*reach  - A.lift*reach };
-  const gB={ x:grip.x+rdx*Bs.t*reach, y:grip.y+rdy*Bs.t*reach - Bs.lift*reach };
+  /* The rope is gripped on a diagonal across the body, the way it is actually done: the
+     leading fist high in front of the sternum where the taut line arrives, the trailing fist
+     low and back by the opposite hip, with the slack falling away from it. Each hand hauls
+     down that diagonal, lets go, and swings back out to the catch. */
+  const gripLow = { x: grip.x - reach*0.26, y: grip.y + reach*0.52 };
+  const along = (st) => ({ x: lerp(grip.x, gripLow.x, st), y: lerp(grip.y, gripLow.y, st) });
+  const gA = along(A.s),  gB = along(Bs.s);
+  gA.out = A.out; gB.out = Bs.out;
+  gA.st = A.s;   gB.st = Bs.s;
+  /* the recovery swing goes outward, toward the viewer and a little forward */
+  gA.x += A.out*reach*0.10;  gA.y -= A.out*reach*0.06;
+  gB.x += Bs.out*reach*0.10; gB.y -= Bs.out*reach*0.06;
 
-  /* --- reset everything we drive, so each frame starts from the rest pose --- */
   for(const k of ["Hips","Spine","Spine1","Spine2","Neck","Head",
                   "LeftShoulder","LeftArm","LeftForeArm","LeftHand",
                   "RightShoulder","RightArm","RightForeArm","RightHand",
@@ -1280,6 +1317,8 @@ function poseHuman(dt){
   /* she is never inert: between hauls the weight rocks slowly foot to foot and she breathes */
   B.Hips.position.x += hipUnit * 0.035 * idle * Math.sin(T*0.55);
   B.Hips.position.y += hipUnit * 0.008 * idle * Math.sin(T*1.5);
+  B.Hips.position.y -= hipUnit * 0.020 * bobA;                     // the beat lands in the knees
+  B.Hips.position.x += hipUnit * 0.016 * bobA * Math.sin(T*1.55);
   B.Hips.position.z -= hipUnit * HUMAN.hipBack * load;   // model faces +Z, so back is -Z
   B.Hips.position.y -= hipUnit * HUMAN.hipDrop * load;
   B.Hips.quaternion.copy(R.Hips)
@@ -1287,14 +1326,16 @@ function poseHuman(dt){
 
   /* --- spine: the lean is spread over three joints, plus a little counter-twist --- */
   /* shoulders travel back over tucked hips — the posture you actually take on a rope */
-  const leanEach = -(0.11 + 0.19*E)*(0.4+0.6*stroke);
+  const leanEach = -(0.16 + 0.30*E)*(0.4+0.6*stroke);   // reference sits much deeper
   const breath = Math.sin(T*1.5)*0.022*idle + bobA*0.05;
   for(const [k,w] of [["Spine",1.0],["Spine1",0.85],["Spine2",0.6]]){
     if(!B[k]) continue;
     B[k].quaternion.copy(R[k])
       .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), breath*w))
       .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), leanEach*w))
-      .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,1,0), 0.06*w*(1-stroke)));
+      .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,1,0), 0.06*w*(1-stroke)))
+      .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), -bobA*0.13*w))
+      .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,0,1), Math.sin(T*1.55)*0.05*groove*w));
   }
   /* head stays on the rope, chin tucking as he strains */
   if(B.Neck) B.Neck.quaternion.copy(R.Neck)
@@ -1308,19 +1349,25 @@ function poseHuman(dt){
 
   HUMAN.root.updateMatrixWorld(true);
 
-  /* --- arms: IK onto the grip points, elbows poled down and out --- */
+  /* --- arms: IK onto the two fists, elbow driving back behind the torso --- */
   const armZ = 40;
+  /* the fists run along this diagonal, so the wrists line up with it rather than with the
+     horizontal line — that is what stopped the hands reading as broken */
+  const dgx = gripLow.x-grip.x, dgy = gripLow.y-grip.y;
+  const dgl = Math.hypot(dgx,dgy)||1;
   for(const [side, g] of [["Left", gA], ["Right", gB]]){
     const up=B[side+"Arm"], fore=B[side+"ForeArm"], hand=B[side+"Hand"];
     if(!up||!fore||!hand) continue;
-    _gT.set(vx(g.x), vy(g.y), armZ + (side==="Left" ? 16 : -14));
-    _pole.set(vx(g.x - reach*0.9), vy(g.y + reach*1.2), armZ - 40);
+    const zOut = armZ + (side==="Left" ? 20 : -16) + g.st*46 + g.out*18;
+    _gT.set(vx(g.x), vy(g.y), zOut);
+    /* elbow poles down and BACK past the ribs on the pull, and swings out on recovery */
+    _pole.set(vx(g.x - reach*(1.05 - 0.5*g.out)), vy(g.y + reach*0.55), zOut - 60 + g.out*80);
     ccdIK([up, fore], hand, _gT, 4);
     pole(up, fore, _gT, _pole);
     ccdIK([fore], hand, _gT, 2);        // forearm only: a full pass would undo the pole
-    /* wrist lines the hand up with the rope */
-    const wq=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1,0,0), new THREE.Vector3(rdx,-rdy,0));
-    applyWorldDelta(hand, wq.slerp(new THREE.Quaternion(), 0.55));
+    const wq=new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(1,0,0), new THREE.Vector3(dgx/dgl, -dgy/dgl, 0));
+    applyWorldDelta(hand, wq.slerp(new THREE.Quaternion(), 0.35));
   }
 
   /* --- legs: IK onto planted feet, so the knees absorb the hip drop --- */
@@ -1357,15 +1404,21 @@ function poseHuman(dt){
   for(const side of ["Left","Right"]){
     const up=B[side+"UpLeg"], lo=B[side+"Leg"], foot=B[side+"Foot"];
     if(!up||!lo||!foot) continue;
-    const pt=plant[side];
-    _gT.set(vx(pt.x), vy(pt.y), (side==="Left" ? 26 : -30));
-    _pole.set(vx(pt.x + HUMAN.reach*0.9), vy(pt.y - HUMAN.reach*0.6), 140);
+    const pt=plant[side], front = side==="Left";
+    _gT.set(vx(pt.x), vy(pt.y), (front ? 30 : -34));
+    /* Front leg reads long and braced, back leg takes the deep bend — the knee pole sits
+       forward of the foot for both, so neither knee can fold backwards. */
+    _pole.set(vx(pt.x + HUMAN.reach*(front ? 1.5 : 0.75)),
+              vy(pt.y - HUMAN.reach*(front ? 0.95 : 0.35)),
+              (front ? 190 : 120));
     ccdIK([up, lo], foot, _gT, 4);
     pole(up, lo, _gT, _pole);
     ccdIK([lo], foot, _gT, 2);          // shin only, same reason
-    /* keep the sole roughly flat on the ground */
-    const fq=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,-1,0), new THREE.Vector3(0.25,-1,0).normalize());
-    applyWorldDelta(foot, fq.slerp(new THREE.Quaternion(), 0.45));
+    /* soles sit flat on the floor, as they do when someone is really braced */
+    const lift = STEP.active && STEP.side===side ? 0.55 : 0;
+    const fq=new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0,-1,0), new THREE.Vector3(front ? 0.14 : 0.10, -1, 0).normalize());
+    applyWorldDelta(foot, fq.slerp(new THREE.Quaternion(), 0.90 - lift*0.55));
   }
 
   /* --- a loaded fist visibly bends the line into it --- */
@@ -1384,9 +1437,12 @@ function poseHuman(dt){
   anchorL.y = anchorBase.y - rdy*yank;
 
   /* whichever fist is loaded owns where the free end bends */
-  const gw = A.grip + Bs.grip || 1;
-  fistW.x = (gA.x*A.grip + gB.x*Bs.grip)/gw;
-  fistW.y = (gA.y*A.grip + gB.y*Bs.grip)/gw;
+  /* the loose end threads through BOTH fists in order — high one first, then the low one,
+     then away — which is what makes the grip read as a grip */
+  const lo = A.s >= Bs.s ? gA : gB, hi = A.s >= Bs.s ? gB : gA;
+  fistHi.x = hi.x; fistHi.y = hi.y;
+  fistLo.x = lo.x; fistLo.y = lo.y;
+  fistW.x = hi.x;  fistW.y = hi.y;
 
   /* sweat off the brow */
   if(!reduced && B.Head){
@@ -1476,6 +1532,9 @@ function placeCards(dt){
       for(let j=0;j<=cl.segY;j++){
         const vv=j/cl.segY;
         const dist=threadLen+vv*cardH;
+        /* cloth hangs BACK from the line as it descends: physically right for laundry, and
+           it keeps the sheet strictly behind the character's legs instead of through them */
+        const rake = -CFG.card.rake*Math.pow(vv, 0.85);
         let px=top.x+dnx*dist, py=top.y+dny*dist, pz=0;
         if(!reduced){
           /* ramps away from the pinned top edge and corners, but never fully dies, so
@@ -1483,7 +1542,7 @@ function placeCards(dt){
           const env=(0.12+0.88*Math.pow(vv,0.95))*(0.25+0.75*uEnv);
           const phase=ph0+uu*lenU-vv*CFG.card.waveLenV;
           const w1=Math.sin(phase), w2=Math.sin(phase*1.73+1.1);
-          pz=amp*env*(w1*0.90+w2*0.34) + vv*vv*16;   // + the natural forward bow of hanging cloth
+          pz=amp*env*(w1*0.90+w2*0.34);
           /* billowing shortens the cloth in plane and lifts the free edge */
           /* in-plane billow: the cloth gathers sideways and its free edge rides up and
              down, which is what actually reads as wind from the front */
@@ -1496,7 +1555,7 @@ function placeCards(dt){
           pz += curl*Math.sin(ph0*0.7+uu*3.1);
         }
         const o=(j*cl.nx+i)*3;
-        pos[o]=vx(px); pos[o+1]=vy(py); pos[o+2]=pz;
+        pos[o]=vx(px); pos[o+1]=vy(py); pos[o+2]=rake + Math.min(pz, vv>0.25 ? 0 : pz);
       }
     }
     cl.geo.attributes.position.needsUpdate=true;
