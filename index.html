@@ -73,6 +73,46 @@ body{
 .stage:focus-visible{outline:2px solid var(--terra);outline-offset:4px}
 #gl{position:absolute;inset:0;width:100%;height:100%;display:block}
 
+.player{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  margin-top:clamp(10px,1.6vw,16px);
+  font-size:12px;color:var(--ink-soft);
+}
+.play{
+  width:40px;height:40px;border-radius:50%;
+  border:1px solid rgba(90,66,40,.22);background:var(--terra);color:#fff;
+  display:grid;place-items:center;cursor:pointer;
+  transition:transform .18s ease,filter .18s ease;
+}
+.play:hover{filter:brightness(1.06)}
+.play:active{transform:scale(.94)}
+.play:focus-visible{outline:2px solid var(--terra);outline-offset:3px}
+.play svg{width:18px;height:18px;fill:currentColor}
+.play .ico-pause{display:none}
+.play[aria-pressed="true"] .ico-play{display:none}
+.play[aria-pressed="true"] .ico-pause{display:block}
+.tracks{display:flex;gap:4px;background:rgba(255,255,255,.6);border:1px solid rgba(90,66,40,.16);border-radius:999px;padding:3px}
+.trk{
+  border:0;background:transparent;color:var(--ink-soft);
+  font:inherit;padding:5px 11px;border-radius:999px;cursor:pointer;
+  transition:background .18s ease,color .18s ease;
+}
+.trk:hover{color:var(--ink)}
+.trk:active{transform:scale(.97)}
+.trk[aria-checked="true"]{background:var(--ink);color:#FFF8EC}
+.trk:focus-visible{outline:2px solid var(--terra);outline-offset:2px}
+.own input{position:absolute;width:1px;height:1px;opacity:0}
+.own span{
+  display:inline-block;padding:6px 12px;border-radius:999px;cursor:pointer;
+  border:1px dashed rgba(90,66,40,.34);
+  transition:background .18s ease,border-color .18s ease;
+}
+.own:hover span{background:rgba(255,255,255,.7);border-color:rgba(90,66,40,.5)}
+.own input:focus-visible + span{outline:2px solid var(--terra);outline-offset:2px}
+.vol{display:flex;align-items:center;margin-left:auto}
+.vol input{width:96px;accent-color:var(--terra);cursor:pointer}
+@media (max-width:640px){ .vol{margin-left:0} .player{gap:8px} }
+
 .rope-foot{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:clamp(10px,2vw,20px)}
 .nav{display:flex;gap:8px}
 .nav button{
@@ -115,6 +155,26 @@ body{
     <canvas id="gl"></canvas>
     <div class="fallback" id="fallback">This section needs WebGL. The testimonials are listed below.</div>
     <ul class="sr" id="srList"></ul>
+  </div>
+
+  <div class="player" role="group" aria-label="Music she is listening to">
+    <button type="button" id="playBtn" class="play" aria-pressed="false" aria-label="Play music">
+      <svg viewBox="0 0 24 24" class="ico-play"><path d="M8 5.5v13l11-6.5z"/></svg>
+      <svg viewBox="0 0 24 24" class="ico-pause"><path d="M8.5 5.5h3v13h-3zM12.5 5.5h3v13h-3z"/></svg>
+    </button>
+    <div class="tracks" role="radiogroup" aria-label="Track">
+      <button type="button" class="trk" data-track="lofi"  role="radio" aria-checked="true">Lo-fi</button>
+      <button type="button" class="trk" data-track="house" role="radio" aria-checked="false">House</button>
+      <button type="button" class="trk" data-track="funk"  role="radio" aria-checked="false">Funk</button>
+    </div>
+    <label class="own">
+      <input type="file" id="ownFile" accept="audio/*">
+      <span>Use your own track</span>
+    </label>
+    <label class="vol">
+      <span class="sr">Volume</span>
+      <input type="range" id="vol" min="0" max="100" value="55">
+    </label>
   </div>
 
   <div class="rope-foot">
@@ -462,14 +522,14 @@ function paintCard(d, w, h, dpr){
   let ty = stacked ? pad+qSize : (h-(lines.length-1)*lh)/2 + qSize*0.34;
   for(const ln of lines){ x.fillText(ln, pad, ty); ty+=lh; }
 
-  const mSize=Math.max(11, Math.round(h*0.052));
+  let mSize=Math.max(11, Math.round(h*0.052));
   const avR  =Math.max(14, Math.round(h*0.075));
   let ax, ay;
   if(stacked){
     ay = h-pad-avR*0.2;
     x.strokeStyle="rgba(186,164,130,.55)"; x.lineWidth=1;
     x.beginPath(); x.moveTo(pad, ay-avR*1.9); x.lineTo(w-pad, ay-avR*1.9); x.stroke();
-    if(x.measureText(d.role).width > w-pad*2-avR*3) x.font=`${Math.round(mSize*0.8)}px -apple-system, system-ui, sans-serif`;
+    while(x.measureText(d.role).width > w-pad*2-avR*3.6 && mSize>9){ mSize--; x.font=`${mSize}px -apple-system, system-ui, sans-serif`; }
     ax = pad+avR;
   } else {
     const cx0 = pad+colW+Math.round(w*0.05);
@@ -671,6 +731,54 @@ function placeHuman(){
 
 let humanX=0, humanGroundY=0;
 
+/* Sound coming out of the cups: rings that bloom on each beat and fade as they expand.
+   Spawned from the head bone, so they track her nodding. */
+/* an arc, not a full ring: it reads as sound leaving the cup rather than a halo */
+const RING_GEO = new THREE.RingGeometry(0.90, 1, 30, 1, -0.55, 1.10);
+const rings = [];
+for(let i=0;i<14;i++){
+  const mat = new THREE.MeshBasicMaterial({ color:0xC2603C, transparent:true, opacity:0, side:THREE.DoubleSide, depthWrite:false });
+  const m = new THREE.Mesh(RING_GEO, mat);
+  m.visible=false; scene.add(m);
+  rings.push({ m, mat, life:0, side:1, delay:0, power:0.5 });
+}
+/* two arcs per ear, the second trailing the first, so each beat leaves as a little wave train */
+function spawnRings(power){
+  const want=[[1,0],[1,0.10],[-1,0],[-1,0.10]];
+  let i=0;
+  for(const r of rings){
+    if(i>=want.length) break;
+    if(r.life>0) continue;
+    r.life=1; r.side=want[i][0]; r.delay=want[i][1]; r.power=power;
+    r.m.visible=false;
+    i++;
+  }
+}
+function stepRings(dt){
+  const B=HUMAN.B;
+  if(!HUMAN.ready || !B.Head) return;
+  B.Head.updateWorldMatrix(true,false);
+  const hp = new THREE.Vector3().setFromMatrixPosition(B.Head.matrixWorld);
+  /* sizes are stage pixels, derived from her stature — HUMAN.scale is a model->px factor
+     in the hundreds and must not be used as a length */
+  const stature = HUMAN.scale * 1.66;
+  const ear = stature * 0.045;
+  for(const r of rings){
+    if(r.life<=0){ if(r.m.visible) r.m.visible=false; continue; }
+    if(r.delay>0){ r.delay-=dt; r.m.visible=false; continue; }
+    r.life -= dt*1.35;
+    const k = 1-clamp(r.life,0,1);
+    const size = stature*(0.055 + 0.155*k) * (0.75+0.45*r.power);
+    r.m.visible = true;
+    /* well clear of the head volume, or the arcs render inside her hair */
+    r.m.position.set(hp.x + r.side*ear*2.6, hp.y + stature*0.02, hp.z + stature*0.30);
+    r.m.scale.setScalar(size);
+    r.m.rotation.z = r.side < 0 ? Math.PI : 0;          // arcs open away from the head
+    r.mat.opacity = clamp(r.life,0,1)*0.62*(0.45+0.55*r.power);
+  }
+}
+function onBeat(){ if(!reduced) spawnRings(clamp(AUDIO.bass*1.6, 0.25, 1)); }
+
 /* sweat, kept from the earlier build — it sells the effort */
 const sweat = [];
 for(let i=0;i<18;i++){
@@ -678,6 +786,164 @@ for(let i=0;i<18;i++){
   const m=new THREE.Mesh(GEO.ball, mat);
   m.visible=false; scene.add(m);
   sweat.push({ m, mat, life:0, x:0, y:0, z:0, vx:0, vy:0, r:4 });
+}
+
+/* =====================================================================
+   WHAT SHE IS LISTENING TO
+   =====================================================================
+   Three grooves are synthesised here rather than shipped as files — no assets, no licence,
+   and the scheduler knows the tempo, so her head is nodding to the actual beat instead of a
+   loose sine. You can also load your own track; either way the sound is routed through one
+   analyser and the character and the speaker rings read from that. */
+const AUDIO = {
+  ctx:null, master:null, analyser:null, bins:null,
+  playing:false, source:null, el:null,
+  track:"lofi", bpm:82,
+  level:0, bass:0, beat:0, beatAt:0, bassAvg:0,
+};
+
+const GROOVES = {
+  lofi : { label:"Lo-fi",  bpm:82,  swing:0.16 },
+  house: { label:"House",  bpm:124, swing:0    },
+  funk : { label:"Funk",   bpm:104, swing:0.08 },
+};
+
+function audioInit(){
+  if(AUDIO.ctx) return AUDIO.ctx;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if(!Ctx) return null;
+  const ctx = new Ctx();
+  const master = ctx.createGain();
+  master.gain.value = 0.55;
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  analyser.smoothingTimeConstant = 0.72;
+  master.connect(analyser);
+  analyser.connect(ctx.destination);
+  AUDIO.ctx = ctx; AUDIO.master = master; AUDIO.analyser = analyser;
+  AUDIO.bins = new Uint8Array(analyser.frequencyBinCount);
+  /* one noise buffer, reused for hats and snares */
+  const n = ctx.createBuffer(1, ctx.sampleRate*0.4, ctx.sampleRate);
+  const d = n.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i] = Math.random()*2-1;
+  AUDIO.noise = n;
+  return ctx;
+}
+
+/* ---- tiny synth voices ---- */
+function vKick(t, gain){
+  const c=AUDIO.ctx, o=c.createOscillator(), g=c.createGain();
+  o.frequency.setValueAtTime(132, t);
+  o.frequency.exponentialRampToValueAtTime(44, t+0.11);
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.0008, t+0.34);   // exponential decay, not linear
+  o.connect(g).connect(AUDIO.master); o.start(t); o.stop(t+0.36);
+}
+function vNoise(t, dur, hp, gain){
+  const c=AUDIO.ctx, s=c.createBufferSource(), f=c.createBiquadFilter(), g=c.createGain();
+  s.buffer=AUDIO.noise; f.type="highpass"; f.frequency.value=hp;
+  g.gain.setValueAtTime(gain, t);
+  g.gain.exponentialRampToValueAtTime(0.0008, t+dur);
+  s.connect(f).connect(g).connect(AUDIO.master); s.start(t); s.stop(t+dur+0.02);
+}
+function vTone(t, freq, dur, type, gain, cutoff){
+  const c=AUDIO.ctx, o=c.createOscillator(), f=c.createBiquadFilter(), g=c.createGain();
+  o.type=type; o.frequency.setValueAtTime(freq, t);
+  f.type="lowpass"; f.frequency.setValueAtTime(cutoff||1200, t);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(gain, t+0.02);
+  g.gain.exponentialRampToValueAtTime(0.0008, t+dur);
+  o.connect(f).connect(g).connect(AUDIO.master); o.start(t); o.stop(t+dur+0.02);
+}
+
+/* ---- step sequencer: 16 steps per bar, scheduled a beat ahead ---- */
+const SEQ = { step:0, next:0, timer:null };
+const NOTE = n => 27.5*Math.pow(2, (n-9)/12);          // midi-ish -> Hz
+const PATTERNS = {
+  lofi : { kick:[1,0,0,0, 0,0,1,0, 0,0,1,0, 0,0,0,0], snare:[0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,1],
+           hat:[0,0,1,0, 0,0,1,0, 0,0,1,0, 0,1,1,0], bass:[33,0,0,36, 0,0,31,0, 0,29,0,0, 33,0,0,0],
+           chord:[[48,52,55],null,null,null, null,null,null,null, [45,48,52],null,null,null, null,null,null,null] },
+  house: { kick:[1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0], snare:[0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
+           hat:[0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,1], bass:[36,0,36,0, 34,0,34,0, 31,0,31,0, 34,0,36,0],
+           chord:[[48,51,55],null,null,null, null,null,[46,50,53],null, null,null,null,null, [48,51,55],null,null,null] },
+  funk : { kick:[1,0,0,1, 0,0,1,0, 0,1,0,0, 1,0,0,0], snare:[0,0,0,0, 1,0,0,1, 0,0,0,0, 1,0,1,0],
+           hat:[1,0,1,1, 0,1,1,0, 1,0,1,1, 0,1,1,0], bass:[33,0,33,35, 0,36,0,33, 0,0,38,0, 36,0,33,0],
+           chord:[null,null,[45,49,52],null, null,null,null,null, null,null,[43,47,50],null, null,null,null,null] },
+};
+function seqTick(){
+  const c=AUDIO.ctx, g=GROOVES[AUDIO.track], pat=PATTERNS[AUDIO.track];
+  if(!c || !pat) return;
+  const spb = 60/g.bpm, spStep = spb/4;
+  while(SEQ.next < c.currentTime + 0.12){
+    const i = SEQ.step % 16;
+    const swing = (i%2 ? g.swing*spStep : 0);
+    const t = SEQ.next + swing;
+    if(pat.kick[i])  vKick(t, 0.9);
+    if(pat.snare[i]) vNoise(t, 0.16, 1300, 0.34);
+    if(pat.hat[i])   vNoise(t, 0.045, 6500, 0.13);
+    if(pat.bass[i])  vTone(t, NOTE(pat.bass[i]), spStep*1.7, "sawtooth", 0.24, 420);
+    const ch = pat.chord[i];
+    if(ch) for(const n of ch) vTone(t, NOTE(n+12), spb*1.6, "triangle", 0.055, 2200);
+    SEQ.next += spStep;
+    SEQ.step++;
+  }
+}
+function grooveStart(){
+  const c=audioInit(); if(!c) return;
+  grooveStop();
+  SEQ.step=0; SEQ.next=c.currentTime+0.06;
+  SEQ.timer=setInterval(seqTick, 25);
+  seqTick();
+}
+function grooveStop(){ if(SEQ.timer){ clearInterval(SEQ.timer); SEQ.timer=null; } }
+
+/* ---- a track the visitor supplies ---- */
+function playFile(file){
+  const c=audioInit(); if(!c) return;
+  grooveStop();
+  if(AUDIO.el){ AUDIO.el.pause(); URL.revokeObjectURL(AUDIO.el.src); }
+  const el=new Audio(URL.createObjectURL(file));
+  el.loop=true; el.crossOrigin="anonymous";
+  const src=c.createMediaElementSource(el);
+  src.connect(AUDIO.master);
+  AUDIO.el=el; AUDIO.source=src; AUDIO.track="file";
+  el.play().catch(()=>{});
+}
+
+function audioPlay(){
+  const c=audioInit(); if(!c) return;
+  if(c.state==="suspended") c.resume();
+  AUDIO.playing=true;
+  if(AUDIO.track==="file" && AUDIO.el) AUDIO.el.play().catch(()=>{});
+  else grooveStart();
+}
+function audioPause(){
+  AUDIO.playing=false;
+  grooveStop();
+  if(AUDIO.el) AUDIO.el.pause();
+}
+/* per frame: level, bass energy and a beat flag the character reads */
+function audioSample(dt){
+  if(!AUDIO.analyser || !AUDIO.playing){
+    AUDIO.level = lerp(AUDIO.level, 0, 1-Math.pow(0.02,dt));
+    AUDIO.beat  = Math.max(0, AUDIO.beat - dt*3.2);
+    return;
+  }
+  AUDIO.analyser.getByteFrequencyData(AUDIO.bins);
+  let bass=0, all=0;
+  for(let i=1;i<8;i++)  bass += AUDIO.bins[i];
+  for(let i=0;i<AUDIO.bins.length;i++) all += AUDIO.bins[i];
+  bass /= 7*255; all /= AUDIO.bins.length*255;
+  AUDIO.bass = bass;
+  AUDIO.level = lerp(AUDIO.level, all, 1-Math.pow(0.001,dt));
+  AUDIO.bassAvg = lerp(AUDIO.bassAvg, bass, 1-Math.pow(0.2,dt));
+  const now = performance.now();
+  if(bass > AUDIO.bassAvg*1.28 + 0.04 && now - AUDIO.beatAt > 170){
+    AUDIO.beatAt = now;
+    AUDIO.beat = 1;
+    onBeat();
+  }
+  AUDIO.beat = Math.max(0, AUDIO.beat - dt*3.4);
 }
 
 /* =====================================================================
@@ -694,22 +960,26 @@ function layout(){
   W=w; H=h;
   const narrow = W<760;
 
-  cardW = W * (narrow ? 0.64 : 0.72);
-  cardH = H * (narrow ? 0.40 : 0.42);
+  cardW = W * (narrow ? 0.60 : 0.72);
+  cardH = 0;   // derived below, once the line height is known
   const gap = W * (narrow ? 0.028 : 0.032);
   step = cardW + gap;
   span = cardW - CFG.card.ringInset*2;
   threadLen = H * 0.05;
 
-  /* The line sits at the chest height of a standing person, so the haul reads as a real
-     tug-of-war stance rather than someone reaching overhead. */
-  const lineY = H * (narrow ? 0.36 : 0.40);
-  humanGroundY = H * 0.965;
-  humanX       = W * (narrow ? -0.09 : 0.085);   // phones only have room for her arms
-  HUMAN.scale  = (humanGroundY - lineY) / (1.66 * 0.74);   // rope meets her at chest height
+  /* Composition is derived from her stature, not the other way round: pick how tall she
+     stands, and the line lands at her chest. On phones she is shorter so the whole figure
+     fits in frame instead of being sliced by the edge. */
+  humanGroundY = H * (narrow ? 0.985 : 0.965);
+  const stature = H * (narrow ? 0.70 : 0.765);
+  const lineY   = humanGroundY - stature*0.74;
+  humanX        = W * (narrow ? 0.14 : 0.085);
+  HUMAN.scale   = stature / 1.66;
   placeHuman();
 
-  /* the rope starts at his fists: grip point comes off the measured shoulder and arm */
+  cardH = (H*0.945) - lineY - threadLen;          // hang from the line down to the floor line
+
+  /* the rope starts at her fists: grip point comes off the measured shoulder and arm */
   const armLen = HUMAN.ready ? HUMAN.armLen : (humanGroundY-lineY)*0.34;
   const shX    = HUMAN.ready ? HUMAN.shoulder.x : humanX;
   gripPoint  = { x: shX + armLen*0.62, y: lineY };
@@ -749,7 +1019,7 @@ function layout(){
   rope.seg=(straight/(N-1))*CFG.rope.slack;
   ropeRestLen=rope.seg*(N-1);
   lenRatio=ropeRestLen/(anchorR.x-anchorBase.x);
-  const activeCX = W*(narrow?0.19:0.075) + cardW/2;
+  const activeCX = W*(narrow?0.26:0.075) + cardW/2;
   s0 = (activeCX-anchorBase.x)*lenRatio;
 
   const dpr = Math.min(devicePixelRatio||1, 2) * 1.35;
@@ -882,6 +1152,7 @@ let blinkAt=1.6, blink=0, earTwitch=0, nextTwitch=3;
 let sweatTimer=0, foreheadAbs={x:150,y:100};
 let haulTravel=0, slackPay=0;                 // rope that has run through her hands
 let leanS=0, leanV=0, headLag=0;               // posture spring, and the head trailing it
+let bob=0, bobV=0;                             // head nod, driven by the beat
 const gripS={Left:0, Right:0};                 // how closed each fist is
 const footOff={Left:0, Right:0};               // per-foot re-brace offset
 let footDrift=0;
@@ -965,6 +1236,15 @@ function poseHuman(dt){
   const idle = 1 - clamp(effortS*3.5, 0, 1);
   headLag = lerp(headLag, leanS, 1-Math.pow(0.02, dt));
 
+  /* Nodding to whatever is in her headphones. She is working, so the bob is strongest
+     between hauls and gets damped down when the rope is actually loaded. */
+  /* bass energy carries a beat far better than overall level, which sits low */
+  const groove = clamp(AUDIO.level*5.5 + AUDIO.bass*0.55, 0, 1) * (0.35 + 0.65*idle);
+  bobV += (AUDIO.beat*1.5 - bob)*46*dt - bobV*7.5*dt;
+  bob  += bobV*dt;
+  const bobA = bob*groove*(reduced ? 0.2 : 1);
+
+
   /* direction of the rope, away from him */
   let hx=anchorR.x-grip.x, hy=anchorR.y-grip.y;
   const hlen=Math.hypot(hx,hy)||1, rdx=hx/hlen, rdy=hy/hlen;
@@ -1008,7 +1288,7 @@ function poseHuman(dt){
   /* --- spine: the lean is spread over three joints, plus a little counter-twist --- */
   /* shoulders travel back over tucked hips — the posture you actually take on a rope */
   const leanEach = -(0.11 + 0.19*E)*(0.4+0.6*stroke);
-  const breath = Math.sin(T*1.5)*0.022*idle;
+  const breath = Math.sin(T*1.5)*0.022*idle + bobA*0.05;
   for(const [k,w] of [["Spine",1.0],["Spine1",0.85],["Spine2",0.6]]){
     if(!B[k]) continue;
     B[k].quaternion.copy(R[k])
@@ -1018,11 +1298,13 @@ function poseHuman(dt){
   }
   /* head stays on the rope, chin tucking as he strains */
   if(B.Neck) B.Neck.quaternion.copy(R.Neck)
-    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.16+0.22*load));
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.16+0.22*load + bobA*0.30))
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,0,1), Math.sin(T*3.1)*0.05*groove));
   if(B.Head) B.Head.quaternion.copy(R.Head)
     /* the head lags the chest by a beat instead of moving as one rigid piece */
     .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.10+0.12*headLag))
-    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,1,0), 0.05*idle*Math.sin(T*0.4)));
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), bobA*0.34))
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,1,0), 0.05*idle*Math.sin(T*0.4) + Math.sin(T*1.55)*0.07*groove));
 
   HUMAN.root.updateMatrixWorld(true);
 
@@ -1252,7 +1534,7 @@ function setThread(g, a, corner){
    ===================================================================== */
 let last=performance.now(), acc=0, ready=false;
 const FIXED=1/60;
-window.__jerry = { rope, cards, CFG, HUMAN,
+window.__jerry = { rope, cards, CFG, HUMAN, AUDIO, rings,
   simStep: () => tick(FIXED),
   ropeStep: () => drawRope(),
   renderInfo: () => ({ triangles: renderer.info.render.triangles, calls: renderer.info.render.calls, programs: renderer.info.programs.length }),
@@ -1314,6 +1596,8 @@ function tick(dt){
   placeCards(dt);
   stepRope(dt, reduced ? 0 : gust, effortS);
   stepParticles(dt);
+  audioSample(dt);
+  stepRings(dt);
 }
 
 /* =====================================================================
@@ -1347,6 +1631,33 @@ new ResizeObserver(() => {
     scroll=frac*step; target=Math.round(frac)*step; scrollV=0;
   }, 120);
 }).observe(stage);
+
+/* ---------- player controls ---------- */
+const playBtn=document.getElementById("playBtn"), volEl=document.getElementById("vol");
+function setPlaying(on){
+  playBtn.setAttribute("aria-pressed", on ? "true":"false");
+  playBtn.setAttribute("aria-label", on ? "Pause music" : "Play music");
+  if(on) audioPlay(); else audioPause();
+}
+playBtn.addEventListener("click", () => setPlaying(!AUDIO.playing));
+for(const b of document.querySelectorAll(".trk")){
+  b.addEventListener("click", () => {
+    for(const o of document.querySelectorAll(".trk")) o.setAttribute("aria-checked", o===b ? "true":"false");
+    AUDIO.track = b.dataset.track;
+    AUDIO.bpm = GROOVES[AUDIO.track].bpm;
+    if(AUDIO.el){ AUDIO.el.pause(); }
+    if(AUDIO.playing) grooveStart();
+  });
+}
+document.getElementById("ownFile").addEventListener("change", e => {
+  const f = e.target.files && e.target.files[0];
+  if(!f) return;
+  for(const o of document.querySelectorAll(".trk")) o.setAttribute("aria-checked","false");
+  playFile(f);
+  setPlaying(true);
+  document.querySelector(".own span").textContent = f.name.length>26 ? f.name.slice(0,24)+"…" : f.name;
+});
+volEl.addEventListener("input", () => { if(AUDIO.master) AUDIO.master.gain.value = volEl.value/100 * 0.9; });
 
 /* the character arrives asynchronously; the scene runs without him until it does */
 try {
