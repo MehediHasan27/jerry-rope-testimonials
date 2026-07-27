@@ -89,8 +89,9 @@ body{
 .dot{width:8px;height:8px;padding:0;border:0;border-radius:50%;background:rgba(90,66,40,.26);cursor:pointer;
   transition:width .25s cubic-bezier(.2,.8,.2,1),background .25s ease}
 .dot[aria-current="true"]{width:26px;border-radius:5px;background:var(--terra)}
+.dot:active{transform:scale(.9)}
 .dot:focus-visible{outline:2px solid var(--terra);outline-offset:3px}
-.hint{font-size:12px;color:var(--ink-soft);margin-left:auto;display:flex;align-items:center;gap:8px;transition:opacity .5s ease}
+.hint{font-size:12px;color:var(--ink-soft);margin-left:auto;display:flex;align-items:center;gap:8px;transition:opacity .26s ease}
 .hint.is-gone{opacity:0}
 .hint kbd{font:inherit;font-size:11px;border:1px solid rgba(90,66,40,.26);border-bottom-width:2px;border-radius:5px;padding:1px 5px;background:rgba(255,255,255,.65)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
@@ -173,6 +174,14 @@ const CFG = {
     waveLenV:2.6,
     waveSpeed:4.0,
     curl:0.5,                  // how much the free bottom corners furl
+  },
+  human:{
+    leanK:150, leanC:16,        // posture spring: the body overshoots and settles
+    gripK:0.0015,               // how fast a fist closes
+    driftPerTension:34,         // px/s the planted feet are dragged toward the rope
+    maxDrift:26,                // before she has to re-brace
+    stepDur:0.30, stepLift:16,
+    ropeBend:2200,              // how hard a loaded fist bends the line
   },
   motion:{
     springK:120, springDamp:19,
@@ -383,8 +392,8 @@ function makeRope(nSeg){
 }
 const _fN=new THREE.Vector3(), _fB=new THREE.Vector3(), _fT=new THREE.Vector3(), _fUp=new THREE.Vector3(0,0,1);
 /* pts: centreline in scene space; arc: matching arc length per sample (for a constant lay) */
-function updateRope(rp, pts, arc, radius, strandR){
-  const n=rp.nSeg, twist=Math.PI*2/CFG.rope.lay;
+function updateRope(rp, pts, arc, radius, strandR, travel){
+  const n=rp.nSeg, twist=Math.PI*2/CFG.rope.lay, tr=travel||0;
   for(let k=0;k<rp.strands.length;k++){
     const phase = k/rp.strands.length*Math.PI*2;
     const buf = rp.buf;
@@ -395,7 +404,7 @@ function updateRope(rp, pts, arc, radius, strandR){
       _fT.normalize();
       _fN.crossVectors(_fT,_fUp); if(_fN.lengthSq()<1e-9) _fN.set(0,1,0); _fN.normalize();
       _fB.crossVectors(_fT,_fN).normalize();
-      const a = phase + arc[i]*twist, c=Math.cos(a), sn=Math.sin(a);
+      const a = phase + (arc[i]-tr)*twist, c=Math.cos(a), sn=Math.sin(a);
       buf[i].x = p.x + (_fN.x*c + _fB.x*sn)*radius;
       buf[i].y = p.y + (_fN.y*c + _fB.y*sn)*radius;
       buf[i].z = (p.z||0) + (_fN.z*c + _fB.z*sn)*radius;
@@ -627,20 +636,22 @@ function initHuman(gltf){
   HUMAN.ready = true;
   if(ready){ const frac = step ? scroll/step : 0; layout(); scroll = frac*step; target = Math.round(frac)*step; }
 }
-/* close both hands once — the fingers are never re-posed after this */
-function gripFists(){
-  for(const side of ["Left","Right"]){
-    for(const f of ["Thumb","Index","Middle","Ring","Pinky"]){
-      for(let j=1;j<=3;j++){
-        const b = HUMAN.B[`${side}Hand${f}${j}`];
-        if(!b) continue;
-        const bend = f==="Thumb" ? 0.55 : (j===1 ? 1.05 : 1.25);
-        b.quaternion.copy(HUMAN.rest[`${side}Hand${f}${j}`])
-                    .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1), (side==="Left"?-1:1)*bend));
-      }
+/* The hand is not a prop: it opens as it comes off the rope during recovery and clamps
+   shut as it takes load again. `closed` is 0..1. */
+const _fq = new THREE.Quaternion(), _fz = new THREE.Vector3(0,0,1);
+function setGrip(side, closed){
+  const dir = side==="Left" ? -1 : 1;
+  for(const f of ["Thumb","Index","Middle","Ring","Pinky"]){
+    for(let j=1;j<=3;j++){
+      const key = `${side}Hand${f}${j}`;
+      const b = HUMAN.B[key];
+      if(!b) continue;
+      const bend = (f==="Thumb" ? 0.60 : (j===1 ? 1.05 : 1.30)) * (0.22 + 0.78*closed);
+      b.quaternion.copy(HUMAN.rest[key]).multiply(_fq.setFromAxisAngle(_fz, dir*bend));
     }
   }
 }
+function gripFists(){ setGrip("Left",1); setGrip("Right",1); }
 /* scale and stand him on the ground line, facing the rope */
 function placeHuman(){
   if(!HUMAN.ready) return;
@@ -833,12 +844,15 @@ function drawRope(){
     _linePts[i].x = vx(a.x); _linePts[i].y = vy(a.y); _linePts[i].z = 0;
     _lineArc[i] = sArc;
   }
-  updateRope(line, _linePts, _lineArc, CFG.rope.radius, CFG.rope.strandR);
+  /* the lay of the rope shifts by exactly the length she has hauled, so the strands are
+     seen running through her fists rather than the rope being a static prop */
+  updateRope(line, _linePts, _lineArc, CFG.rope.radius, CFG.rope.strandR, haulTravel);
+  fibreTex.offset.x = -haulTravel * 120 / Math.max(1, visible);
 
   /* the free end: from the gripping fist it drops away and leaves the lower-left */
   const a=anchorL, f=fistW;
   const sway=Math.sin(T*1.15)*7 + tugPulse*10;
-  const drop=H*0.30 + sway;
+  const drop=H*0.30 + sway + slackPay;
   const c1={x:f.x-30-tugPulse*16, y:f.y+drop*0.5}, c2={x:f.x-10, y:f.y+drop*1.1}, p3={x:-W*0.06, y:H*1.02};
   let run=0, px=0, py=0;
   for(let i=0;i<FREE_SAMPLES;i++){
@@ -855,17 +869,23 @@ function drawRope(){
     _freePts[i].x=vx(x); _freePts[i].y=vy(y); _freePts[i].z=-20+30*Math.sin(t*2.4);
     _freeArc[i]=run;
   }
-  updateRope(freeEnd, _freePts, _freeArc, CFG.rope.radius*0.96, CFG.rope.strandR*0.96);
+  updateRope(freeEnd, _freePts, _freeArc, CFG.rope.radius*0.96, CFG.rope.strandR*0.96, haulTravel);
 }
 
 /* =====================================================================
    CAROUSEL STATE
    ===================================================================== */
-let scroll=0, scrollV=0, target=0, index=0;
+let scroll=0, scrollV=0, lastScroll=0, target=0, index=0;
 let T=0, u=0, effort=0, effortS=0, tugPulse=0;
 let gust=0.34, gustTarget=0.34, nextGust=2;
 let blinkAt=1.6, blink=0, earTwitch=0, nextTwitch=3;
 let sweatTimer=0, foreheadAbs={x:150,y:100};
+let haulTravel=0, slackPay=0;                 // rope that has run through her hands
+let leanS=0, leanV=0, headLag=0;               // posture spring, and the head trailing it
+const gripS={Left:0, Right:0};                 // how closed each fist is
+const footOff={Left:0, Right:0};               // per-foot re-brace offset
+let footDrift=0;
+const STEP={active:false, side:"Right", t:0, from:0, to:0};
 let fistW={x:0,y:0}, fistBackW={x:0,y:0};
 const drag={active:false,id:null,x0:0,scroll0:0,dx:0,lastX:0,lastT:0,vel:0,moved:false};
 
@@ -925,7 +945,9 @@ function handStroke(phase){
      reach from the shoulder (grip sits at 0.62 of arm length ahead of it) */
   if(p<pullEnd){                                   // loaded: hauls from far to near
     const k=easeIO(p/pullEnd);
-    return { t:lerp(0.34,-0.22,k), lift:0, grip:1, drive:Math.sin(Math.PI*(p/pullEnd)) };
+    /* anticipation: the hand settles a touch further out before it drives back */
+    const anticip = Math.sin(Math.min(p/0.12,1)*Math.PI)*0.07;
+    return { t:lerp(0.34,-0.22,k)+anticip, lift:0, grip:1, drive:Math.sin(Math.PI*(p/pullEnd)) };
   }
   const k=easeIO((p-pullEnd)/(1-pullEnd));         // recovery: off the rope, reaching back out
   return { t:lerp(-0.22,0.34,k), lift:Math.sin(Math.PI*k)*0.16, grip:0, drive:0 };
@@ -933,8 +955,15 @@ function handStroke(phase){
 
 const _gT=new THREE.Vector3(), _pole=new THREE.Vector3(), _axis=new THREE.Vector3(0,0,1);
 function poseHuman(dt){
-  const E=effortS, B=HUMAN.B, R=HUMAN.rest;
-  const grip=gripPoint;
+  const B=HUMAN.B, R=HUMAN.rest, grip=gripPoint;
+
+  /* posture runs on a spring rather than straight off effort, so releasing a haul lets the
+     body ride past its mark and settle instead of stopping dead (follow-through) */
+  leanV += ((effortS - leanS)*CFG.human.leanK - leanV*CFG.human.leanC)*dt;
+  leanS = clamp(leanS + leanV*dt, 0, 1.4);
+  const E = leanS;
+  const idle = 1 - clamp(effortS*3.5, 0, 1);
+  headLag = lerp(headLag, leanS, 1-Math.pow(0.02, dt));
 
   /* direction of the rope, away from him */
   let hx=anchorR.x-grip.x, hy=anchorR.y-grip.y;
@@ -942,6 +971,14 @@ function poseHuman(dt){
 
   const A=handStroke(u), Bs=handStroke(u+0.5);
   const stroke=Math.max(A.drive,Bs.drive);
+  const decay = 1-Math.pow(CFG.human.gripK, dt);
+  /* a hand only opens while it is actually mid-recovery; standing there holding the line,
+     both fists are shut */
+  const hauling = clamp(effortS*4, 0, 1);
+  gripS.Left  = lerp(gripS.Left,  Math.max(A.grip,  1-hauling), decay);
+  gripS.Right = lerp(gripS.Right, Math.max(Bs.grip, 1-hauling), decay);
+  setGrip("Left",  0.25 + 0.75*gripS.Left);
+  setGrip("Right", 0.25 + 0.75*gripS.Right);
   const reach = HUMAN.reach;                       // px his arms can span
 
   /* the two grip points, sliding along the rope */
@@ -960,6 +997,9 @@ function poseHuman(dt){
   const load = clamp(0.30 + 0.70*stroke, 0, 1) * (0.42 + 0.58*E);
   const hipUnit = Math.abs(HUMAN.restHip.y) || 1;  // bone units, whatever the rig uses
   B.Hips.position.copy(HUMAN.restHip);
+  /* she is never inert: between hauls the weight rocks slowly foot to foot and she breathes */
+  B.Hips.position.x += hipUnit * 0.035 * idle * Math.sin(T*0.55);
+  B.Hips.position.y += hipUnit * 0.008 * idle * Math.sin(T*1.5);
   B.Hips.position.z -= hipUnit * HUMAN.hipBack * load;   // model faces +Z, so back is -Z
   B.Hips.position.y -= hipUnit * HUMAN.hipDrop * load;
   B.Hips.quaternion.copy(R.Hips)
@@ -968,9 +1008,11 @@ function poseHuman(dt){
   /* --- spine: the lean is spread over three joints, plus a little counter-twist --- */
   /* shoulders travel back over tucked hips — the posture you actually take on a rope */
   const leanEach = -(0.11 + 0.19*E)*(0.4+0.6*stroke);
+  const breath = Math.sin(T*1.5)*0.022*idle;
   for(const [k,w] of [["Spine",1.0],["Spine1",0.85],["Spine2",0.6]]){
     if(!B[k]) continue;
     B[k].quaternion.copy(R[k])
+      .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), breath*w))
       .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), leanEach*w))
       .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,1,0), 0.06*w*(1-stroke)));
   }
@@ -978,7 +1020,9 @@ function poseHuman(dt){
   if(B.Neck) B.Neck.quaternion.copy(R.Neck)
     .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.16+0.22*load));
   if(B.Head) B.Head.quaternion.copy(R.Head)
-    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.10+0.12*load));
+    /* the head lags the chest by a beat instead of moving as one rigid piece */
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(1,0,0), 0.10+0.12*headLag))
+    .multiply(new THREE.Quaternion().setFromAxisAngle(_axis.set(0,1,0), 0.05*idle*Math.sin(T*0.4)));
 
   HUMAN.root.updateMatrixWorld(true);
 
@@ -999,9 +1043,34 @@ function poseHuman(dt){
 
   /* --- legs: IK onto planted feet, so the knees absorb the hip drop --- */
   const fY = humanGroundY;
+
+  /* Under tension the planted feet are dragged toward the rope; past a threshold she lifts
+     the trailing foot and re-braces. The two feet alternate, so she holds her ground over a
+     long haul instead of either sliding out of frame or staying welded to two spots. */
+  footDrift = Math.min(CFG.human.maxDrift, footDrift + effortS*CFG.human.driftPerTension*dt);
+  if(!STEP.active && footDrift - Math.min(footOff.Left, footOff.Right) > CFG.human.maxDrift*0.7){
+    STEP.active = true;
+    STEP.t = 0;
+    STEP.side = STEP.side === "Left" ? "Right" : "Left";
+    STEP.from = footOff[STEP.side];
+    STEP.to   = footDrift;
+  }
+  let stepLift = 0;
+  if(STEP.active){
+    STEP.t += dt/CFG.human.stepDur;
+    const k = clamp(STEP.t, 0, 1);
+    footOff[STEP.side] = lerp(STEP.from, STEP.to, easeIO(k));
+    stepLift = Math.sin(Math.PI*k)*CFG.human.stepLift;
+    if(STEP.t >= 1){
+      STEP.active = false;
+      const m = Math.min(footOff.Left, footOff.Right);   // both re-braced: rebase, no creep
+      if(m > 0){ footOff.Left -= m; footOff.Right -= m; footDrift -= m; }
+    }
+  }
+
   const plant = {
-    Left : { x: humanX + HUMAN.stanceFront, y: fY },     // front foot, braced toward the rope
-    Right: { x: humanX - HUMAN.stanceBack,  y: fY },     // back foot, driving
+    Left : { x: humanX + HUMAN.stanceFront + footDrift - footOff.Left,  y: fY - (STEP.active&&STEP.side==="Left"  ? stepLift : 0) },
+    Right: { x: humanX - HUMAN.stanceBack  + footDrift - footOff.Right, y: fY - (STEP.active&&STEP.side==="Right" ? stepLift : 0) },
   };
   for(const side of ["Left","Right"]){
     const up=B[side+"UpLeg"], lo=B[side+"Leg"], foot=B[side+"Foot"];
@@ -1015,6 +1084,15 @@ function poseHuman(dt){
     /* keep the sole roughly flat on the ground */
     const fq=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,-1,0), new THREE.Vector3(0.25,-1,0).normalize());
     applyWorldDelta(foot, fq.slerp(new THREE.Quaternion(), 0.45));
+  }
+
+  /* --- a loaded fist visibly bends the line into it --- */
+  for(const [g, gp] of [[gA, A.grip], [gB, Bs.grip]]){
+    if(gp < 0.35) continue;
+    const sArc = (g.x - anchorL.x) * lenRatio;
+    if(sArc < 14 || sArc > rope.cum[rope.cum.length-1]-14) continue;
+    const loc = atLength(sArc);
+    addForceAt(loc, 0, (g.y - loc.y) * CFG.human.ropeBend * gp);
   }
 
   /* --- the rope end gets yanked toward him on every stroke --- */
@@ -1178,7 +1256,9 @@ window.__jerry = { rope, cards, CFG, HUMAN,
   simStep: () => tick(FIXED),
   ropeStep: () => drawRope(),
   renderInfo: () => ({ triangles: renderer.info.render.triangles, calls: renderer.info.render.calls, programs: renderer.info.programs.length }),
-  get state(){ return {ready,W,H,K,cardW,cardH,step,s0,lenRatio,scroll,target,scrollV,index,T,u,effort,effortS,gust,anchorL,anchorR}; } };
+  get state(){ return {ready,W,H,cardW,cardH,step,scroll,index,T,u,effort,effortS,gust,
+    haulTravel,slackPay,leanS,gripL:gripS.Left,gripR:gripS.Right,footDrift,
+    footOffL:footOff.Left,footOffR:footOff.Right,stepping:STEP.active,stepSide:STEP.side}; } };
 
 function frame(now){
   let dt=(now-last)/1000; last=now;
@@ -1198,7 +1278,7 @@ function tick(dt){
   if(nextGust<=0){ nextGust=1.6+Math.random()*3.2; gustTarget=0.22+Math.random()*0.62; }
   gust=lerp(gust, gustTarget, 1-Math.pow(0.001,dt));
 
-  const prev=scroll;
+  const prev=lastScroll;
   if(!drag.active && !reduced){
     const a=(target-scroll)*CFG.motion.springK - scrollV*CFG.motion.springDamp;
     scrollV+=a*dt; scroll+=scrollV*dt;
@@ -1207,6 +1287,7 @@ function tick(dt){
     scrollV=(scroll-prev)/dt;
   } else scrollV=(scroll-prev)/dt;
   const dScroll=scroll-prev;
+  lastScroll=scroll;
 
   const idx=((Math.round(scroll/step)%DATA.length)+DATA.length)%DATA.length;
   if(idx!==index){ index=idx; dots.forEach((d,i)=>d.setAttribute("aria-current", i===index?"true":"false")); }
@@ -1216,6 +1297,9 @@ function tick(dt){
   effort=Math.max(speedE, holdE);
   effortS=lerp(effortS, effort, 1-Math.pow(0.004,dt));
 
+  haulTravel += dScroll*lenRatio;                       // rope run through her hands
+  slackPay = Math.max(0, slackPay + Math.max(0,dScroll)*0.11 - slackPay*2.2*dt);
+  slackPay = Math.min(slackPay, H*0.16);
   u += (dScroll/(step/CFG.motion.cyclesPerCard));
   u = ((u%1)+1)%1;
 

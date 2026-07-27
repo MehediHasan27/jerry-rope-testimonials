@@ -11,14 +11,22 @@ Open `index.html` — it runs from `file://`, no build step and no network.
 
 | Piece | How it works |
 | --- | --- |
-| The rope | 56-point verlet chain sprung to a designed baseline. The visible rope is real braid geometry: three strands helically wound around a dark core at a constant lay, each strand its own swept tube, resampled every frame at ~4 px so the twist holds at any zoom. Wind, the weight of each hanging card, and the puller's yanks all deviate the line. |
+| The rope | 56-point verlet chain sprung to a designed baseline. The visible rope is real braid geometry: three strands helically wound around a dark core at a constant lay, each strand its own swept tube, resampled every frame at ~4 px so the twist holds at any zoom. The lay shifts by exactly the length hauled, so the rope is seen **running through her hands** rather than sitting still while the cards move; slack pays out of the loose end as she pulls. A loaded fist bends the line into it. |
 | The cards | 24×14 cloth grids pinned at their two top corners. The top edge rides the real rope curve between its loops; folds travel across the surface, the hem undulates, the bottom corners furl. Normals are recomputed per frame, so lighting and shadows follow the deformation. |
-| The puller | A rigged humanoid GLB, skeleton only — every pose is authored. Hips drop and travel back under load, the lean is spread across three spine joints over tucked hips, arms are solved with CCD IK plus an elbow pole onto two grip points that slide along the rope half a cycle apart, and the legs are solved onto planted feet so the knees absorb the weight shift. Fingers are curled into fists once at load. |
+| The puller | A rigged humanoid GLB, skeleton only — every pose is authored. Hips drop and travel back under load, the lean is spread across three spine joints over tucked hips, arms are solved with CCD IK plus an elbow pole onto two grip points that slide along the rope half a cycle apart. Each fist **opens on its recovery and clamps shut as it takes load**. Under tension her planted feet are dragged toward the rope, and past a threshold she lifts the trailing foot and **re-braces** — feet alternating, so she holds her ground over a long haul. Legs solve onto those plants, so the knees absorb the weight shift. |
 | The interaction | Spring-snapped infinite carousel. Drag distance and flick velocity decide the next index; the character's effort — lean depth, pull speed, sweat rate, rope tension — is driven by that same value. |
 
 Card text is painted to a canvas texture (so it deforms with the cloth) and duplicated in
 the DOM, visually hidden, for screen readers. `prefers-reduced-motion` stills the wind and
 the flutter and shortens the transition.
+
+## How it is made to feel like weight
+
+Posture runs on a spring fed by effort, not straight off it, so a released haul lets the body
+ride past its mark and settle instead of stopping dead. The head lags the chest by a beat
+rather than moving as one rigid piece. Each stroke starts with a beat of anticipation — the
+hand reaches a touch further out before it drives back. Between hauls she is never inert: the
+weight rocks slowly foot to foot and she breathes.
 
 ## Tuning
 
